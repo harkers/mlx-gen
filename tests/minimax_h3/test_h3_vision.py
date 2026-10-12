@@ -48,3 +48,49 @@ def test_rope_index_lays_out_text_then_image_grid():
     assert positions[1, 3:9].tolist() == [3, 3, 3, 4, 4, 4]  # rows
     assert positions[2, 3:9].tolist() == [3, 4, 5, 3, 4, 5]  # columns
     assert positions[:, 9:].tolist() == [[6, 7]] * 3  # text resumes after max(h, w) // merge
+
+
+@pytest.mark.fast
+def test_vision_attention_never_materializes_the_attention_matrix():
+    """Qwen3-VL's 72-wide heads fall off MLX's fused attention kernel on older MLX, which then builds the full
+    heads x N x N matrix: 25 GiB for a 2048-pixel Ref2VA reference. The output must not change either way."""
+    import mlx.core as mx
+
+    from mflux.models.minimax_h3.model.h3_text_encoder.qwen3_vl_vision_model import Qwen3VLVisionAttention
+
+    num_heads, head_dim = 16, 72
+    attention = Qwen3VLVisionAttention(num_heads * head_dim, num_heads)
+    mx.eval(attention.parameters())
+
+    def inputs(seq_len):
+        x = mx.random.normal((seq_len, num_heads * head_dim), key=mx.random.key(0)).astype(mx.bfloat16)
+        angles = mx.random.uniform(shape=(seq_len, head_dim), key=mx.random.key(1))
+        mx.eval(x, angles)
+        return x, mx.cos(angles), mx.sin(angles)
+
+    def transient(seq_len):
+        x, cos, sin = inputs(seq_len)
+        mx.eval(cos, sin)
+        mx.clear_cache()
+        mx.reset_peak_memory()
+        base = mx.get_active_memory()
+        mx.eval(attention(x, cos, sin))
+        return mx.get_peak_memory() - base
+
+    # A materialized matrix quadruples when the sequence doubles; fused attention's working set only doubles.
+    small, large = transient(2048), transient(4096)
+    assert large / small < 3, f"{small / 2**20:.0f} MiB at 2048 rows, {large / 2**20:.0f} MiB at 4096"
+
+    seq_len = 1024
+    x, cos, sin = inputs(seq_len)
+    out = attention(x, cos, sin)
+    # Same result as plain softmax attention, computed in float32.
+    qkv = attention.qkv(x).reshape(seq_len, 3, num_heads, head_dim).astype(mx.float32)
+    query, key, value = qkv[:, 0], qkv[:, 1], qkv[:, 2]
+    rotate = lambda t: mx.concatenate([-t[..., head_dim // 2 :], t[..., : head_dim // 2]], axis=-1)  # noqa: E731
+    query = query * cos[:, None] + rotate(query) * sin[:, None]
+    key = key * cos[:, None] + rotate(key) * sin[:, None]
+    q, k, v = (t.transpose(1, 0, 2) for t in (query, key, value))
+    weights = mx.softmax((q @ k.transpose(0, 2, 1)) * head_dim**-0.5, axis=-1)
+    expected = attention.proj((weights @ v).transpose(1, 0, 2).reshape(seq_len, -1).astype(mx.bfloat16))
+    assert mx.allclose(out.astype(mx.float32), expected.astype(mx.float32), atol=5e-2, rtol=5e-2)

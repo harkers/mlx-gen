@@ -131,6 +131,9 @@ class Qwen3VLVisionPatchMerger(nn.Module):
         return self.linear_fc2(nn.gelu(self.linear_fc1(x)))
 
 
+_FUSED_HEAD_DIMS = (64, 80, 128)  # head widths every supported MLX runs through its fused attention kernel
+
+
 class Qwen3VLVisionAttention(nn.Module):
     def __init__(self, dim: int, num_heads: int):
         super().__init__()
@@ -147,13 +150,20 @@ class Qwen3VLVisionAttention(nn.Module):
         query32, key32 = query.astype(mx.float32), key.astype(mx.float32)
         query = (query32 * cos + _rotate_half(query32) * sin).astype(query.dtype)
         key = (key32 * cos + _rotate_half(key32) * sin).astype(key.dtype)
+        # The 72-wide heads have no fused kernel before MLX 0.32, where attention then builds the whole
+        # heads x N x N matrix (25 GiB for a 2048-pixel reference). Zero-padding to a fused width leaves q.k and the
+        # attention weights unchanged, and the padded value columns come out zero and are sliced away.
+        pad = next((width for width in _FUSED_HEAD_DIMS if width >= self.head_dim), self.head_dim) - self.head_dim
+        if pad:
+            query, key, value = (mx.pad(t, [(0, 0), (0, 0), (0, pad)]) for t in (query, key, value))
         out = mx.fast.scaled_dot_product_attention(
             query.transpose(1, 0, 2)[None],
             key.transpose(1, 0, 2)[None],
             value.transpose(1, 0, 2)[None],
             scale=self.head_dim**-0.5,
         )
-        return self.proj(out[0].transpose(1, 0, 2).reshape(seq_len, -1))
+        out = out[0].transpose(1, 0, 2)[..., : self.head_dim]
+        return self.proj(out.reshape(seq_len, -1))
 
 
 class Qwen3VLVisionMLP(nn.Module):
