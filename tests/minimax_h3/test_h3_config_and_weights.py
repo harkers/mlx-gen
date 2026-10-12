@@ -638,3 +638,12 @@ def test_ref2va_capabilities_publish_one_reference_route():
     # The base entries are untouched.
     base = get_model_capabilities(model="minimax-h3", model_config=ModelConfig.minimax_h3()).to_dict()
     assert [row["id"] for row in base["capabilities"]] == ["minimax-h3.text-video", "minimax-h3.first-frame"]
+
+
+@pytest.mark.fast
+def test_ref2va_capability_publishes_no_unmeasured_memory_line():
+    ref2va = ModelConfig.minimax_h3_ref2va()
+    (row,) = get_model_capabilities(model="minimax-h3-ref2va", model_config=ref2va).to_dict()["capabilities"]
+    # The FL2VA line was never measured on the Ref2VA transformer; nothing is validated for it yet.
+    assert row["peak_bytes_fixed"] is None and row["peak_bytes_per_packed_row"] is None
+    assert row["validated_quantization_bits"] == [] and row["recommended_quantize"] == 8

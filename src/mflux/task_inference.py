@@ -2228,6 +2228,10 @@ def _minimax_h3_ref2va_capabilities(identity: _ModelIdentity, overrides: dict) -
         "prompt_sections": MINIMAX_H3_REF2VA_PROMPT_SECTIONS,
         "measured_runs": (),
         "max_validated_frames": None,
+        # The FL2VA memory line and q8 validation were measured on the base transformer, not this one.
+        "peak_bytes_fixed": None,
+        "peak_bytes_per_packed_row": None,
+        "validated_quantization_bits": (),
     }
     return ModelCapabilities(
         schema_version=CAPABILITIES_SCHEMA_VERSION,
@@ -2533,6 +2537,13 @@ def _raise_no_capability(
     ):
         raise TaskInferenceError(
             f"{label} does not support {reference_image_count} --reference-image input(s) for {public_task}."
+        )
+    task_rows = [capability for capability in model_capabilities.capabilities if capability.public_task == public_task]
+    if task_rows and all(reference_image_count < capability.min_reference_images for capability in task_rows):
+        fewest = min(capability.min_reference_images for capability in task_rows)
+        raise TaskInferenceError(
+            f"{label} does not support {public_task} without a reference image: it needs at least {fewest} "
+            "--reference-image input(s)."
         )
     if public_task == IMAGE_TO_IMAGE and not any(
         cap.public_task == IMAGE_TO_IMAGE for cap in model_capabilities.capabilities

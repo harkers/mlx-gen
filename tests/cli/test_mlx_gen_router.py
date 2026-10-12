@@ -7541,3 +7541,13 @@ def test_router_refuses_references_on_the_base_model(capsys):
 def test_router_refuses_ref2va_without_references():
     with pytest.raises(SystemExit):
         mlx_gen._resolve_invocation(["--model", "minimax-h3-ref2va", "--prompt", "x"])
+
+
+def test_router_names_the_missing_reference_image_for_ref2va(capsys):
+    for argv in (
+        ["--model", "minimax-h3-ref2va", "--prompt", "x"],
+        ["--model", "minimax-h3-ref2va", "--reference-audio", "burton.wav", "--prompt", "x"],
+    ):
+        with pytest.raises(SystemExit):
+            mlx_gen._resolve_invocation(argv)
+        assert "needs at least 1 --reference-image" in capsys.readouterr().err
