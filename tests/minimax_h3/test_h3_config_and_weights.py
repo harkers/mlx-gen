@@ -632,8 +632,6 @@ def test_ref2va_capabilities_publish_one_reference_route():
     assert row["min_reference_images"] == 1 and row["max_reference_images"] == 9
     assert row["min_images"] == 0 and row["max_images"] == 0
     assert row["supports_lora"] is False and row["generates_audio"] is True
-    # The FL2VA memory measurements do not describe this transformer's runs.
-    assert row["measured_runs"] == [] and row["max_validated_frames"] is None
     assert [section["label"] for section in row["prompt_sections"]] == ["subject_definitions"]
     # The base entries are untouched.
     base = get_model_capabilities(model="minimax-h3", model_config=ModelConfig.minimax_h3()).to_dict()
@@ -644,6 +642,12 @@ def test_ref2va_capabilities_publish_one_reference_route():
 def test_ref2va_capability_publishes_no_unmeasured_memory_line():
     ref2va = ModelConfig.minimax_h3_ref2va()
     (row,) = get_model_capabilities(model="minimax-h3-ref2va", model_config=ref2va).to_dict()["capabilities"]
-    # The FL2VA line was never measured on the Ref2VA transformer; nothing is validated for it yet.
+    # One measured run is a point, not a line: no fitted peak line is published for it.
     assert row["peak_bytes_fixed"] is None and row["peak_bytes_per_packed_row"] is None
-    assert row["validated_quantization_bits"] == [] and row["recommended_quantize"] == 8
+    assert row["recommended_quantize"] == 8 and row["validated_quantization_bits"] == [8]
+    assert row["max_validated_frames"] == 124
+    (run,) = row["measured_runs"]
+    assert run["outcome"] == "completed" and run["quantize"] == 8
+    assert (run["width"], run["height"], run["frames"]) == (960, 544, 124)
+    # The 2048px reference's prompt encode no longer sets the peak: denoising does, ~90 GiB.
+    assert 85 * 2**30 < run["footprint_bytes"] < 95 * 2**30

@@ -2151,6 +2151,26 @@ def _minimax_h3_shared_capability_kwargs(overrides: dict) -> dict:
     }
 
 
+# Ref2VA on the same M5 Max, q8, default cache limit, conditioner resident: one 1376x768 reference image (fitted
+# to 3680x2048) and one 11.5 s voice clip, 960x544 at 124 frames. Measured with the fused vision attention: before
+# it, the prompt encode of that reference spiked to a 115.3 GB footprint and set the peak. Denoising sets it now,
+# and the peak per step does not depend on the step count (2 here; the full 50-step run was accepted on review).
+MINIMAX_H3_REF2VA_MEASURED_RUNS: tuple[MemoryMeasurement, ...] = (
+    MemoryMeasurement(
+        footprint_bytes=96_666_164_408,
+        outcome="completed",
+        quantize=8,
+        width=960,
+        height=544,
+        frames=124,
+        steps=2,
+        mlx_peak_bytes=88_601_090_702,
+        cache_limit_bytes=_DEFAULT_CACHE_LIMIT_BYTES,
+        machine_total_ram_bytes=_M5_MAX_RAM_BYTES,
+    ),
+)
+
+
 def _minimax_h3_capabilities(identity: _ModelIdentity) -> ModelCapabilities:
     # Guidance-distilled joint video + audio model: one text-to-video route (the audio track rides along),
     # no negative prompt, LoRA on the single transformer (the lightx2v Turbo adapters). First-frame
@@ -2226,12 +2246,12 @@ def _minimax_h3_ref2va_capabilities(identity: _ModelIdentity, overrides: dict) -
     shared = {
         **_minimax_h3_shared_capability_kwargs(overrides),
         "prompt_sections": MINIMAX_H3_REF2VA_PROMPT_SECTIONS,
-        "measured_runs": (),
-        "max_validated_frames": None,
-        # The FL2VA memory line and q8 validation were measured on the base transformer, not this one.
+        "measured_runs": MINIMAX_H3_REF2VA_MEASURED_RUNS,
+        "max_validated_frames": 124,
+        "validated_quantization_bits": (8,),
+        # One measured run is a point, not a line; the base transformer's fitted line is not this model's.
         "peak_bytes_fixed": None,
         "peak_bytes_per_packed_row": None,
-        "validated_quantization_bits": (),
     }
     return ModelCapabilities(
         schema_version=CAPABILITIES_SCHEMA_VERSION,

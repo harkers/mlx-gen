@@ -413,8 +413,10 @@ video = model.generate_video(
 - **Audio** is decoded to 32 kHz stereo (mono is copied to both channels) and truncated to the clip's
   duration; at least 2 seconds, up to 3 clips, and only alongside at least one image.
 - No Turbo adapter exists for Ref2VA: 50 steps by default.
-- **Not yet validated on the released weights.** The layout, presentation and conditioning port the diffusers
-  `ref2va` workflow and are covered by tiny-model tests only.
+- **Validated on the released weights at q8**: one reference image (1376x768) and one 11.5 s voice clip, 960x544
+  at 124 frames, 50 steps. The spoken line transcribes exactly, and it took 74 minutes (about 89 s per step) on an
+  M5 Max. Peak footprint is about 90 GiB, published in `mlxgen capabilities` as a measured run. Longer clips are
+  not validated yet.
 
 ## Verification
 
