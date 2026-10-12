@@ -179,6 +179,7 @@ class MiniMaxH3(nn.Module):
         audio_shift: float | None = None,
         image_path: str | None = None,
         references: list[H3Reference] | None = None,
+        reference_resize: str = "diffusers",
         soundscape: str | None = None,
         music: str | None = None,
         generate_audio: bool = True,
@@ -190,7 +191,7 @@ class MiniMaxH3(nn.Module):
         self._check_route(is_ref2va, references, image_path, soundscape, music)
         keyframe = self._load_keyframe(image_path) if image_path is not None else None
         plan = self._plan(width, height, num_frames, num_inference_steps, video_shift, audio_shift, keyframe=keyframe)
-        loaded = self._load_references(references, plan) if references else []
+        loaded = self._load_references(references, plan, reference_resize) if references else []
         self._preflight_request(plan, extra_rows=self._reference_rows(loaded))
         if references:
             full_prompt = self._ref2va_prompt(prompt)
@@ -347,7 +348,10 @@ class MiniMaxH3(nn.Module):
                 "text_tokens": int(text_length),
                 "generate_audio": bool(generate_audio),
                 **(
-                    {"references": [{"kind": reference.kind, "path": reference.path} for reference in references]}
+                    {
+                        "references": [{"kind": reference.kind, "path": reference.path} for reference in references],
+                        "reference_resize": reference_resize,
+                    }
                     if references
                     else {}
                 ),
@@ -605,11 +609,16 @@ class MiniMaxH3(nn.Module):
         return text
 
     def _load_references(
-        self, references: list[H3Reference], plan: H3GenerationPlan
+        self, references: list[H3Reference], plan: H3GenerationPlan, resize: str = "diffusers"
     ) -> list[PIL.Image.Image | np.ndarray]:
         """Decode and normalise every reference in request order: images fitted, audio truncated to the clip."""
         return [
-            fit_reference_image(self._load_keyframe(reference.path), REFERENCE_IMAGE_SHORT_EDGE)
+            fit_reference_image(
+                self._load_keyframe(reference.path),
+                REFERENCE_IMAGE_SHORT_EDGE,
+                mode=resize,
+                target_size=(plan.width, plan.height),
+            )
             if reference.kind == "image"
             else load_reference_audio(reference.path, self.audio_vae.sampling_rate, plan.num_frames / FPS)
             for reference in references

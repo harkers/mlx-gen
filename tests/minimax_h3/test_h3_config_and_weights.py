@@ -651,3 +651,101 @@ def test_ref2va_capability_publishes_no_unmeasured_memory_line():
     assert (run["width"], run["height"], run["frames"]) == (960, 544, 124)
     # The 2048px reference's prompt encode no longer sets the peak: denoising does, ~90 GiB.
     assert 85 * 2**30 < run["footprint_bytes"] < 95 * 2**30
+
+
+def _tiny_h3_transformer():
+    from mflux.models.minimax_h3.model.h3_transformer.h3_transformer import MiniMaxH3Transformer
+
+    return MiniMaxH3Transformer(
+        num_attention_heads=2,
+        attention_head_dim=16,
+        hidden_size=32,
+        num_layers=1,
+        num_refiner_layers=1,
+        ffn_dim=64,
+        text_dim=16,
+        freq_dim=32,
+        time_embed_hidden_dim=32,
+        time_embed_dim=16,
+        rope_freq_dim=2,
+    )
+
+
+@pytest.mark.fast
+def test_ref2va_turbo_route_applies_the_ref2v_adapter():
+    turbo = ModelConfig.from_name("minimax-h3-ref2va-turbo")
+    assert turbo.aliases[0] == "minimax-h3-ref2va-turbo"
+    assert ModelConfig.minimax_h3_ref2va_turbo().aliases[0] == "minimax-h3-ref2va-turbo"
+    overrides = turbo.transformer_overrides
+    assert overrides["task"] == "ref2va" and overrides["transformer_subdir"] == "transformer_ref"
+    assert (
+        overrides["turbo_lora"]
+        == "hf:lightx2v/Minimax-h3-Turbo/minimax_h3_ref2v_turbo_8step_v1.0_768p_bf16.safetensors"
+    )
+    # The publisher's recommendation for this adapter: 8 steps, Euler, video / audio shift 12 / 3.
+    assert overrides["default_steps"] == 8
+    assert overrides["default_video_shift"] == 12.0 and overrides["default_audio_shift"] == 3.0
+    assert MiniMaxH3WeightDefinition.for_config(turbo).transformer_subdir == "transformer_ref"
+    # The 50-step route is untouched.
+    base = ModelConfig.from_name("minimax-h3-ref2va")
+    assert base.aliases[0] == "minimax-h3-ref2va" and "turbo_lora" not in base.transformer_overrides
+    capabilities = get_model_capabilities(model="minimax-h3-ref2va-turbo", model_config=turbo).to_dict()
+    (row,) = capabilities["capabilities"]
+    assert capabilities["label"] == "MiniMax-H3 Ref2VA Turbo" and row["id"] == "minimax-h3.ref2va"
+    assert row["default_steps"] == 8 and row["measured_runs"] == [] and row["validated_quantization_bits"] == []
+
+
+@pytest.mark.fast
+def test_catalog_turbo_adapter_that_misses_targets_fails_clearly(tmp_path):
+    from types import SimpleNamespace
+
+    from mflux.models.common.lora.mapping.lora_loader import LoRAApplicationError
+
+    to_q = {
+        "transformer_blocks.0.attn.to_q.lora_A.default.weight": mx.zeros((4, 32)),
+        "transformer_blocks.0.attn.to_q.lora_B.default.weight": mx.zeros((32, 4)),
+    }
+    fits, misses = tmp_path / "fits.safetensors", tmp_path / "misses.safetensors"
+    mx.save_safetensors(str(fits), to_q, {"alpha": "4"})
+    mx.save_safetensors(
+        str(misses),
+        {**to_q, "transformer_blocks.0.attn.not_a_module.lora_A.default.weight": mx.zeros((4, 32))},
+        {"alpha": "4"},
+    )
+
+    def model_with(adapter):
+        overrides = {"turbo_lora": str(adapter)}
+        return SimpleNamespace(
+            model_config=SimpleNamespace(transformer_overrides=overrides), transformer=_tiny_h3_transformer()
+        )
+
+    fitted = model_with(fits)
+    MiniMaxH3Initializer._apply_lora(fitted, None, None)
+    assert fitted.lora_application_result.reports[0].applied_target_count == 1
+    with pytest.raises(LoRAApplicationError, match="1 of 3 keys unmatched"):
+        MiniMaxH3Initializer._apply_lora(model_with(misses), None, None)
+
+
+@pytest.mark.slow
+def test_released_ref2v_turbo_adapter_covers_the_ref2va_transformer():
+    """Applies the real 1.38 GB adapter to the released transformer geometry, lazily initialised (nothing allocated)."""
+    import os
+    from types import SimpleNamespace
+
+    from mflux.models.minimax_h3.model.h3_transformer.h3_transformer import MiniMaxH3Transformer
+
+    path = os.environ.get("MFLUX_H3_REF2V_TURBO_LORA")
+    if not path:
+        pytest.skip("needs MFLUX_H3_REF2V_TURBO_LORA (minimax_h3_ref2v_turbo_8step_v1.0_768p_bf16.safetensors)")
+    weights = mx.load(path)
+    # No AdaLN projection is trained by this adapter: nothing to fit onto the quantization-sensitive `adaln_proj`.
+    assert not any("adaln" in key for key in weights)
+    model = SimpleNamespace(
+        model_config=SimpleNamespace(transformer_overrides={"turbo_lora": path}), transformer=MiniMaxH3Transformer()
+    )
+    MiniMaxH3Initializer._apply_lora(model, None, None)
+    (report,) = model.lora_application_result.reports
+    # Every key matched and every shape validated: q/k/v/out + both FF projections in 50 blocks and 2 refiners.
+    assert report.total_key_count == 624 and report.matched_key_count == 624 and report.unmatched_key_count == 0
+    assert report.applied_target_count == (50 + 2) * 6
+    assert report.scale == pytest.approx(8 / 128)

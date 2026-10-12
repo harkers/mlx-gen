@@ -82,6 +82,7 @@ def main() -> None:
                     audio_shift=args.audio_shift,
                     image_path=args.image_path,
                     references=references or None,
+                    reference_resize=args.reference_resize,
                     generate_audio=not args.no_audio,
                     # Low-RAM mode uses this model's own lever; the flag stays available on its own.
                     release_text_encoder=args.release_text_encoder or args.low_ram,
@@ -191,6 +192,14 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         help="minimax-h3-ref2va: a reference audio clip (2-15 s, e.g. a voice to speak in), labelled <Audio 1>, ... "
         "Repeatable, up to 3; needs at least one --reference-image. Images are always read before audio clips.",
+    )
+    parser.add_argument(
+        "--reference-resize",
+        choices=("diffusers", "match"),
+        default="diffusers",
+        help="minimax-h3-ref2va: how reference images are sized. 'diffusers' (default) forces a 2048-pixel short "
+        "edge, as the released pipeline does; 'match' gives them the output canvas's pixel area and never upscales, "
+        "the policy lightx2v trained its Turbo adapters with.",
     )
     parser.add_argument(
         "--width", type=int, default=None, help="Canvas width, multiple of 32 (default: 16:9 at 768p short edge)."

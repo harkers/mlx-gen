@@ -109,3 +109,18 @@ def test_released_audio_vae_round_trips_a_speech_reference():
     correlation = np.corrcoef(log_spectrogram(waveform[0]).ravel(), log_spectrogram(decoded[0]).ravel())[0, 1]
     print(f"audio VAE round-trip log-spectrogram correlation: {correlation:.4f}")
     assert correlation > 0.85
+
+
+@pytest.mark.fast
+def test_match_resize_follows_the_target_area_and_never_upscales():
+    # LightX2V's `match` policy, which its distilled Turbo adapters were trained with.
+    assert fit_reference_image(PIL.Image.new("RGB", (1376, 768)), mode="match", target_size=(960, 544)).size == (
+        960,
+        544,
+    )
+    assert fit_reference_image(PIL.Image.new("RGB", (640, 360)), mode="match", target_size=(960, 544)).size == (
+        640,
+        352,
+    )
+    with pytest.raises(ValueError, match="'diffusers' or 'match'"):
+        fit_reference_image(PIL.Image.new("RGB", (640, 360)), mode="stretch", target_size=(960, 544))

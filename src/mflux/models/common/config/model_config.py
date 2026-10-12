@@ -323,6 +323,10 @@ class ModelConfig:
         return AVAILABLE_MODELS["minimax-h3-ref2va"]
 
     @staticmethod
+    def minimax_h3_ref2va_turbo() -> "ModelConfig":
+        return AVAILABLE_MODELS["minimax-h3-ref2va-turbo"]
+
+    @staticmethod
     @lru_cache
     def wan2_2_i2v_a14b() -> "ModelConfig":
         return AVAILABLE_MODELS["wan2.2-i2v-a14b"]
@@ -976,6 +980,36 @@ AVAILABLE_MODELS = {
             "default_height": 768,
             "default_video_shift": 12.0,
             "default_audio_shift": 3.0,
+        },
+        text_encoder_overrides={"model_type": "qwen3_vl", "hidden_size": 5120, "num_layers": 50},
+    ),
+    "minimax-h3-ref2va-turbo": ModelConfig(
+        priority=34,
+        aliases=["minimax-h3-ref2va-turbo", "h3-ref2va-turbo"],
+        model_name="MiniMaxAI/MiniMax-H3",
+        base_model=None,
+        controlnet_model=None,
+        custom_transformer_model=None,
+        num_train_steps=1000,
+        max_sequence_length=8192,
+        supports_guidance=False,
+        requires_sigma_shift=False,
+        inference_aliases=["minimax-h3-ref2va-turbo"],
+        transformer_overrides={
+            # lightx2v Ref2V Turbo 8-step v1.0 768p over the Ref2VA transformer. Publisher's settings: 8 steps,
+            # Euler, video / audio shift 12 / 3, up to 768p.
+            "task": "ref2va",
+            "transformer_subdir": "transformer_ref",
+            "generates_audio": True,
+            "supports_image_to_video": False,
+            "default_frames": 124,
+            "default_steps": 8,
+            "default_fps": 24,
+            "default_width": 1344,
+            "default_height": 768,
+            "default_video_shift": 12.0,
+            "default_audio_shift": 3.0,
+            "turbo_lora": "hf:lightx2v/Minimax-h3-Turbo/minimax_h3_ref2v_turbo_8step_v1.0_768p_bf16.safetensors",
         },
         text_encoder_overrides={"model_type": "qwen3_vl", "hidden_size": 5120, "num_layers": 50},
     ),

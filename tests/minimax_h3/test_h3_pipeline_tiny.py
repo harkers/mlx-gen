@@ -378,3 +378,35 @@ def test_ref2va_reference_rows_are_never_stepped(tmp_path, monkeypatch):
         assert np.array_equal(audio[:audio_refs], calls[0][1][:audio_refs])
     # The generated rows do move, so the comparison above is not vacuous.
     assert not np.array_equal(calls[-1][1][audio_refs:], calls[0][1][audio_refs:])
+
+
+@pytest.mark.fast
+def test_ref2va_match_resize_sizes_the_reference_to_the_canvas(tmp_path, monkeypatch):
+    import numpy as np
+    import PIL.Image
+
+    model = _ref2va_model()
+    image_path, voice_path = tmp_path / "lucien.png", tmp_path / "voice.wav"
+    PIL.Image.fromarray((np.random.default_rng(0).random((128, 192, 3)) * 255).astype(np.uint8)).save(image_path)
+    write_wav(voice_path, seconds=6.0, rate=32000, channels=1)
+    seen = {}
+    real_build = h3_variant.build_ref2va_packed_sequence
+
+    def spy(*args, **kwargs):
+        seen["layout"] = real_build(*args, **kwargs)
+        return seen["layout"]
+
+    monkeypatch.setattr(h3_variant, "build_ref2va_packed_sequence", spy)
+    video = model.generate_video(
+        seed=3,
+        prompt="subject_definitions:\n<Subject 1> is the man in <Picture 1>.",
+        references=[H3Reference("image", str(image_path)), H3Reference("audio", str(voice_path))],
+        reference_resize="match",
+        width=96,
+        height=64,
+        num_frames=124,
+        num_inference_steps=1,
+    )
+    # 192x128 is matched down to the 96x64 canvas area: 2 x 3 latent rows.
+    assert seen["layout"].num_condition_video_rows == (64 // 32) * (96 // 32)
+    assert video.extra_metadata["reference_resize"] == "match"

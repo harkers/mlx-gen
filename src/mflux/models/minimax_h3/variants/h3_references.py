@@ -49,12 +49,29 @@ def validate_references(references: list[H3Reference]) -> None:
         raise ValueError("An audio reference has to be paired with at least one image reference.")
 
 
-def fit_reference_image(image: PIL.Image.Image, short_edge: int = REFERENCE_IMAGE_SHORT_EDGE) -> PIL.Image.Image:
-    """Resize (LANCZOS, upscaling included, no area cap) to `short_edge` on the 32-pixel grid."""
+def fit_reference_image(
+    image: PIL.Image.Image,
+    short_edge: int = REFERENCE_IMAGE_SHORT_EDGE,
+    mode: str = "diffusers",
+    target_size: tuple[int, int] | None = None,
+) -> PIL.Image.Image:
+    """Resize (LANCZOS) onto the 32-pixel grid, keeping the aspect ratio.
+
+    `diffusers` forces `short_edge`, upscaling included and with no area cap (the released pipeline). `match` is
+    lightx2v's policy for its distilled Turbo adapters, which were trained with it: the reference takes the pixel
+    area of the `target_size` canvas and is never upscaled.
+    """
     width, height = image.size
     if width > 4 * height or height > 4 * width:
         raise ValueError(f"A reference image must be within 1:4 and 4:1, got {width}x{height}.")
-    scale = short_edge / min(width, height)
+    if mode == "diffusers":
+        scale = short_edge / min(width, height)
+    elif mode == "match" and target_size is not None:
+        scale = min(1.0, (target_size[0] * target_size[1] / (width * height)) ** 0.5)
+    else:
+        raise ValueError(
+            f"The reference resize mode must be 'diffusers' or 'match' (with a target size), got {mode!r}."
+        )
     target = (
         max(REFERENCE_MULTIPLE, round(width * scale / REFERENCE_MULTIPLE) * REFERENCE_MULTIPLE),
         max(REFERENCE_MULTIPLE, round(height * scale / REFERENCE_MULTIPLE) * REFERENCE_MULTIPLE),

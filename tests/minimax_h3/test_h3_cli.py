@@ -122,3 +122,24 @@ def test_cli_rejects_bad_requests_before_loading(monkeypatch, recording, media, 
             "x",
         )
     assert exit_info.value.code == 2 and recording.constructed == []
+
+
+@pytest.mark.fast
+def test_cli_forwards_the_reference_resize_policy(monkeypatch, recording, media):
+    image, voice = media
+    with pytest.raises(_Stop):
+        _run(
+            monkeypatch,
+            "--model",
+            "minimax-h3-ref2va-turbo",
+            "--reference-image",
+            image,
+            "--reference-audio",
+            voice,
+            "--reference-resize",
+            "match",
+            "--prompt",
+            "x",
+        )
+    assert recording.generated[0]["reference_resize"] == "match"
+    assert recording.constructed[0]["model_config"].aliases[0] == "minimax-h3-ref2va-turbo"

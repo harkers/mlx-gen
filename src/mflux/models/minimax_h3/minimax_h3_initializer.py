@@ -7,7 +7,7 @@ import mlx.core as mx
 
 from mflux.callbacks.callback_registry import CallbackRegistry
 from mflux.models.common.config import ModelConfig
-from mflux.models.common.lora.mapping.lora_loader import LoRALoader
+from mflux.models.common.lora.mapping.lora_loader import LoRAApplicationError, LoRALoader
 from mflux.models.common.resolution.lora_resolution import LoraResolution
 from mflux.models.common.resolution.path_resolution import PathResolution
 from mflux.models.common.tokenizer import TokenizerLoader
@@ -187,6 +187,15 @@ class MiniMaxH3Initializer:
             lora_scales=effective_scales,
             state_dict_transform=MiniMaxH3LoRAMapping.normalize_state_dict,
         )
+        if lora_paths == [turbo_lora]:
+            # A catalog entry's own adapter must fit its transformer completely; a partial fit is a wrong file.
+            for report in result.reports:
+                if report.unmatched_key_count or not report.applied_target_count:
+                    raise LoRAApplicationError(
+                        f"The catalog Turbo adapter {report.resolved_path} does not fit this transformer: "
+                        f"{report.unmatched_key_count} of {report.total_key_count} keys unmatched, "
+                        f"{report.applied_target_count} targets applied."
+                    )
         model.lora_paths = list(resolved_paths)
         model.lora_scales = list(user_scales)
         model.lora_application_result = result

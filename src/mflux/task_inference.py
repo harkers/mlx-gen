@@ -2243,12 +2243,14 @@ def _minimax_h3_ref2va_capabilities(identity: _ModelIdentity, overrides: dict) -
     # Reference-to-video: its own transformer (`transformer_ref/`), conditioned on ordered reference images
     # (repeatable --reference-image) and audio clips (repeatable --reference-audio on the backend). It has no
     # keyframe route and no Turbo adapter, and none of the FL2VA memory measurements describe it.
+    is_turbo = bool(overrides.get("turbo_lora"))
     shared = {
         **_minimax_h3_shared_capability_kwargs(overrides),
         "prompt_sections": MINIMAX_H3_REF2VA_PROMPT_SECTIONS,
-        "measured_runs": MINIMAX_H3_REF2VA_MEASURED_RUNS,
-        "max_validated_frames": 124,
-        "validated_quantization_bits": (8,),
+        # The measured run and its validation were on the 50-step entry; the Turbo entry has its own to earn.
+        "measured_runs": () if is_turbo else MINIMAX_H3_REF2VA_MEASURED_RUNS,
+        "max_validated_frames": None if is_turbo else 124,
+        "validated_quantization_bits": () if is_turbo else (8,),
         # One measured run is a point, not a line; the base transformer's fitted line is not this model's.
         "peak_bytes_fixed": None,
         "peak_bytes_per_packed_row": None,
@@ -2256,7 +2258,7 @@ def _minimax_h3_ref2va_capabilities(identity: _ModelIdentity, overrides: dict) -
     return ModelCapabilities(
         schema_version=CAPABILITIES_SCHEMA_VERSION,
         family=identity.family,
-        label="MiniMax-H3 Ref2VA",
+        label="MiniMax-H3 Ref2VA Turbo" if is_turbo else "MiniMax-H3 Ref2VA",
         model_name=identity.model_name,
         capabilities=(
             GenerationCapability(
