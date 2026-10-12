@@ -57,6 +57,7 @@ from mflux.models.minimax_h3.model.h3_text_encoder.qwen3_vl_model import (
 )
 from mflux.models.minimax_h3.model.h3_text_encoder.qwen3_vl_vision_model import preprocess_image
 from mflux.models.minimax_h3.scheduler.minimax_h3_scheduler import MiniMaxH3Scheduler
+from mflux.models.minimax_h3.variants.h3_references import AUDIO_REFERENCE
 from mflux.models.minimax_h3.weights.h3_weight_definition import MiniMaxH3WeightDefinition
 from mflux.utils.generated_audio import GeneratedAudio
 from mflux.utils.generated_video import GeneratedVideo
@@ -427,13 +428,20 @@ class MiniMaxH3(nn.Module):
     def _encode_prompt(self, prompt: str) -> mx.array:
         return self._encode_presentation(prompt, [])[0]
 
-    def _encode_presentation(self, prompt: str, keyframes: list[PIL.Image.Image]) -> tuple[mx.array, np.ndarray]:
-        """Tokenize the presentation (`<Picture i>: ` + vision block per keyframe, then the prompt verbatim) and
-        return `hidden_states[50]` with MiniMax-H3's per-row modality tags (vision blocks count as video rows)."""
+    def _encode_presentation(self, prompt: str, entries: list[PIL.Image.Image | str]) -> tuple[mx.array, np.ndarray]:
+        """Tokenize the presentation and return `hidden_states[50]` with MiniMax-H3's per-row modality tags.
+
+        One label per entry, in order and numbered per modality: `<Picture i>: ` plus a vision block for an image (a
+        keyframe or a `ref2va` reference), `<Audio j>: ` alone for an audio reference (`AUDIO_REFERENCE`; a waveform
+        never reaches the conditioner). The prompt follows verbatim. Vision blocks count as video rows.
+        """
         digest = hashlib.sha1(prompt.encode("utf-8"))
-        for frame in keyframes:
-            digest.update(str(frame.size).encode())
-            digest.update(frame.tobytes())
+        for entry in entries:
+            if isinstance(entry, str):
+                digest.update(b"<audio>")
+            else:
+                digest.update(str(entry.size).encode())
+                digest.update(entry.tobytes())
         cache_key = digest.hexdigest()
         cached = self.prompt_embed_cache.get(cache_key)
         if cached is not None:
@@ -445,11 +453,21 @@ class MiniMaxH3(nn.Module):
         token_ids: list[int] = []
         tags: list[int] = []
         patches, grids = [], []
-        for index, frame in enumerate(keyframes):
-            frame_patches, grid = preprocess_image(frame)
+        num_images = num_audio = 0
+        for entry in entries:
+            if isinstance(entry, str):
+                if entry != AUDIO_REFERENCE:
+                    raise ValueError(f"A presentation entry is an image or {AUDIO_REFERENCE!r}, got {entry!r}.")
+                num_audio += 1
+                label = tokenizer(f"<Audio {num_audio}>: ", add_special_tokens=False)["input_ids"]
+                token_ids += label
+                tags += [TEXT_TAG] * len(label)
+                continue
+            num_images += 1
+            frame_patches, grid = preprocess_image(entry)
             patches.append(frame_patches)
             grids.append(grid)
-            label = tokenizer(f"<Picture {index + 1}>: ", add_special_tokens=False)["input_ids"]
+            label = tokenizer(f"<Picture {num_images}>: ", add_special_tokens=False)["input_ids"]
             num_image_tokens = (grid[0] * grid[1] * grid[2]) // (merge * merge)
             vision = [VISION_START_TOKEN_ID] + [IMAGE_TOKEN_ID] * num_image_tokens + [VISION_END_TOKEN_ID]
             token_ids += label + vision

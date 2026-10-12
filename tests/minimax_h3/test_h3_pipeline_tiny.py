@@ -10,11 +10,16 @@ from mlx import nn
 from mflux.callbacks.callback_registry import CallbackRegistry
 from mflux.models.common.config import ModelConfig
 from mflux.models.minimax_h3.model.h3_audio_vae.h3_audio_vae import H3AudioVAE
-from mflux.models.minimax_h3.model.h3_text_encoder.qwen3_vl_model import Qwen3VLModel
+from mflux.models.minimax_h3.model.h3_text_encoder.qwen3_vl_model import (
+    VISION_END_TOKEN_ID,
+    VISION_START_TOKEN_ID,
+    Qwen3VLModel,
+)
 from mflux.models.minimax_h3.model.h3_text_encoder.qwen3_vl_text_model import Qwen3VLTextModel
 from mflux.models.minimax_h3.model.h3_text_encoder.qwen3_vl_vision_model import Qwen3VLVisionModel
 from mflux.models.minimax_h3.model.h3_transformer.h3_transformer import MiniMaxH3Transformer
 from mflux.models.minimax_h3.model.h3_video_vae.h3_video_vae import H3VideoVAE
+from mflux.models.minimax_h3.variants.h3_references import AUDIO_REFERENCE
 from mflux.models.minimax_h3.variants.minimax_h3 import MiniMaxH3
 from mflux.models.minimax_h3.weights.h3_weight_definition import MiniMaxH3WeightDefinition
 
@@ -206,3 +211,36 @@ def test_progress_still_works_without_a_registry_or_a_callback():
         seed=1, prompt="A fox", num_frames=124, width=96, height=64, num_inference_steps=1, generate_audio=False
     )
     assert video.num_frames == 124
+
+
+@pytest.mark.fast
+def test_presentation_labels_each_reference_in_request_order(monkeypatch):
+    import numpy as np
+    import PIL.Image
+
+    model = _tiny_model()
+    image = PIL.Image.fromarray(np.zeros((64, 64, 3), dtype=np.uint8))
+    captured = []
+    real_encode = model.text_encoder.encode
+
+    def spy(token_ids, *args):
+        captured.append(np.array(token_ids).tolist())
+        return real_encode(token_ids, *args)
+
+    monkeypatch.setattr(model.text_encoder, "encode", spy)
+    tokenizer = model.tokenizers[MiniMaxH3WeightDefinition.TOKENIZER_NAME].tokenizer
+
+    def label(text):
+        return tokenizer(text, add_special_tokens=False)["input_ids"]
+
+    _, tags = model._encode_presentation("P", [image, AUDIO_REFERENCE])
+    ids = captured[-1]
+    picture = label("<Picture 1>: ")
+    assert ids[: len(picture)] == picture and ids[len(picture)] == VISION_START_TOKEN_ID
+    end = ids.index(VISION_END_TOKEN_ID)
+    assert ids[end + 1 :] == label("<Audio 1>: ") + label("P")
+    assert tags[end + 1 :].tolist() == [1] * (len(ids) - end - 1)
+
+    # Swapped order is a different request: the audio label leads, and the cache does not conflate them.
+    model._encode_presentation("P", [AUDIO_REFERENCE, image])
+    assert len(captured) == 2 and captured[-1][: len(label("<Audio 1>: "))] == label("<Audio 1>: ")
