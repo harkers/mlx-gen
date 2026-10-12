@@ -397,7 +397,8 @@ video = model.generate_video(
 - **Order matters.** References are labelled `<Picture i>` / `<Audio j>` in the order given and laid out
   on the rotary clock in that order; the prompt refers to them by those labels.
 - **Images** are resized to their own 2048-pixel short edge (LANCZOS), not to the output canvas, so
-  each one adds about 7,000 packed rows to the request. Up to 9.
+  each one adds about 14,500 packed rows (about 7,200 latent rows plus an equal vision block in the
+  conditioner's sequence). Up to 9. EXIF orientation is honoured.
 - **Audio** is decoded to 32 kHz stereo (mono is copied to both channels) and truncated to the clip's
   duration; at least 2 seconds, up to 3 clips, and only alongside at least one image.
 - No Turbo adapter exists for Ref2VA: 50 steps by default.

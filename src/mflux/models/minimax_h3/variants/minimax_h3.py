@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import mlx.core as mx
 import numpy as np
 import PIL.Image
+import PIL.ImageOps
 from mlx import nn
 from mlx.utils import tree_flatten
 
@@ -61,7 +62,12 @@ from mflux.models.minimax_h3.model.h3_text_encoder.qwen3_vl_model import (
     VISION_END_TOKEN_ID,
     VISION_START_TOKEN_ID,
 )
-from mflux.models.minimax_h3.model.h3_text_encoder.qwen3_vl_vision_model import preprocess_image
+from mflux.models.minimax_h3.model.h3_text_encoder.qwen3_vl_vision_model import (
+    MAX_PIXELS,
+    MIN_PIXELS,
+    preprocess_image,
+    smart_resize,
+)
 from mflux.models.minimax_h3.scheduler.minimax_h3_scheduler import MiniMaxH3Scheduler
 from mflux.models.minimax_h3.variants.h3_references import (
     AUDIO_REFERENCE,
@@ -533,7 +539,8 @@ class MiniMaxH3(nn.Module):
 
     @staticmethod
     def _load_keyframe(image_path: str) -> PIL.Image.Image:
-        return PIL.Image.open(image_path).convert("RGB")
+        # Upright as displayed: a phone portrait is stored landscape with an EXIF rotation.
+        return PIL.ImageOps.exif_transpose(PIL.Image.open(image_path)).convert("RGB")
 
     @staticmethod
     def _fit_keyframe(keyframe: PIL.Image.Image, width: int, height: int) -> PIL.Image.Image:
@@ -609,12 +616,19 @@ class MiniMaxH3(nn.Module):
         ]
 
     def _reference_rows(self, loaded: list[PIL.Image.Image | np.ndarray]) -> int:
-        """Packed rows the references add, known before anything is encoded."""
+        """Packed rows the references add, known before anything is encoded.
+
+        An image costs twice: its latent block, and its vision block among the text rows (merged patch tokens
+        between a start and an end token), which at the 2048-pixel fit is just as large.
+        """
         stride = VAE_SPATIAL_COMPRESSION * PATCH_SIZE
+        merge = 32  # the conditioner's 16-pixel patch times its 2 x 2 spatial merge: one token per 32 x 32 pixels
         rows = 0
         for item in loaded:
             if isinstance(item, PIL.Image.Image):
                 rows += (item.height // stride) * (item.width // stride)
+                vision_height, vision_width = smart_resize(item.height, item.width, merge, MIN_PIXELS, MAX_PIXELS)
+                rows += (vision_height // merge) * (vision_width // merge) + 2
             else:
                 rows += AUDIO_CHANNELS * math.ceil(item.shape[1] / self.audio_vae.hop_length)
         return rows

@@ -319,3 +319,62 @@ def test_peak_estimate_counts_reference_rows():
     base = MiniMaxH3.estimate_peak_bytes(96, 64, 124, resident_bytes=0)
     with_refs = MiniMaxH3.estimate_peak_bytes(96, 64, 124, resident_bytes=0, extra_rows=1000)
     assert with_refs - base == 1000 * MiniMaxH3.PEAK_BYTES_PER_PACKED_ROW
+
+
+@pytest.mark.fast
+def test_reference_rows_count_the_vision_block_as_well_as_the_latents():
+    import PIL.Image
+
+    model = _ref2va_model()
+    # A 3616x2048 reference is 113 x 64 latent rows, and the conditioner reads it unresized as 113 x 64 merged
+    # vision tokens between its start / end tokens: the two halves cost the same.
+    assert model._reference_rows([PIL.Image.new("RGB", (3616, 2048))]) == 2 * 113 * 64 + 2
+
+
+@pytest.mark.fast
+def test_reference_images_honour_exif_orientation(tmp_path):
+    import PIL.Image
+
+    path = tmp_path / "portrait.jpg"
+    image = PIL.Image.new("RGB", (96, 64))
+    exif = image.getexif()
+    exif[0x0112] = 6  # stored landscape, displayed rotated 90 degrees: a phone portrait
+    image.save(path, exif=exif)
+    assert MiniMaxH3._load_keyframe(str(path)).size == (64, 96)
+
+
+@pytest.mark.fast
+def test_ref2va_reference_rows_are_never_stepped(tmp_path, monkeypatch):
+    import numpy as np
+    import PIL.Image
+
+    model = _ref2va_model()
+    monkeypatch.setattr(h3_variant, "REFERENCE_IMAGE_SHORT_EDGE", 64)
+    image_path, voice_path = tmp_path / "lucien.png", tmp_path / "voice.wav"
+    PIL.Image.fromarray((np.random.default_rng(0).random((64, 96, 3)) * 255).astype(np.uint8)).save(image_path)
+    write_wav(voice_path, seconds=6.0, rate=32000, channels=1)
+    calls = []
+    transformer_type = type(model.transformer)
+    real_call = transformer_type.__call__
+
+    def spy(self, *args, **kwargs):
+        calls.append((np.array(kwargs["hidden_states"][0]), np.array(kwargs["audio_hidden_states"][0])))
+        return real_call(self, *args, **kwargs)
+
+    monkeypatch.setattr(transformer_type, "__call__", spy)
+    model.generate_video(
+        seed=3,
+        prompt="subject_definitions:\n<Subject 1> is the man in <Picture 1>.",
+        references=[H3Reference("image", str(image_path)), H3Reference("audio", str(voice_path))],
+        width=96,
+        height=64,
+        num_frames=124,
+        num_inference_steps=3,
+    )
+    video_refs, audio_refs = 6, 2 * 207
+    assert len(calls) == 3
+    for video, audio in calls[1:]:
+        assert np.array_equal(video[:video_refs], calls[0][0][:video_refs])
+        assert np.array_equal(audio[:audio_refs], calls[0][1][:audio_refs])
+    # The generated rows do move, so the comparison above is not vacuous.
+    assert not np.array_equal(calls[-1][1][audio_refs:], calls[0][1][audio_refs:])
