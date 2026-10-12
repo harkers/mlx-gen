@@ -19,9 +19,11 @@ from mflux.models.minimax_h3.model.h3_text_encoder.qwen3_vl_text_model import Qw
 from mflux.models.minimax_h3.model.h3_text_encoder.qwen3_vl_vision_model import Qwen3VLVisionModel
 from mflux.models.minimax_h3.model.h3_transformer.h3_transformer import MiniMaxH3Transformer
 from mflux.models.minimax_h3.model.h3_video_vae.h3_video_vae import H3VideoVAE
-from mflux.models.minimax_h3.variants.h3_references import AUDIO_REFERENCE
+from mflux.models.minimax_h3.variants import minimax_h3 as h3_variant
+from mflux.models.minimax_h3.variants.h3_references import AUDIO_REFERENCE, H3Reference
 from mflux.models.minimax_h3.variants.minimax_h3 import MiniMaxH3
 from mflux.models.minimax_h3.weights.h3_weight_definition import MiniMaxH3WeightDefinition
+from tests.minimax_h3.media_fixtures import write_wav
 
 
 class _StubHFTokenizer:
@@ -93,7 +95,8 @@ def _tiny_model() -> MiniMaxH3:
     model.audio_vae = H3AudioVAE(
         encoder_dim=8,
         encoder_rates=(2, 4, 4, 5, 5),
-        latent_dim=8,
+        # The encoder's attention pools each head down to `latent_channels`, so a head must be a multiple of 32 wide.
+        latent_dim=64,
         latent_channels=32,
         num_attention_heads=2,
         decoder_dim=128,
@@ -244,3 +247,75 @@ def test_presentation_labels_each_reference_in_request_order(monkeypatch):
     # Swapped order is a different request: the audio label leads, and the cache does not conflate them.
     model._encode_presentation("P", [AUDIO_REFERENCE, image])
     assert len(captured) == 2 and captured[-1][: len(label("<Audio 1>: "))] == label("<Audio 1>: ")
+
+
+def _ref2va_model() -> MiniMaxH3:
+    model = _tiny_model()
+    model.model_config = ModelConfig.minimax_h3_ref2va()
+    return model
+
+
+@pytest.mark.fast
+def test_ref2va_conditions_on_an_image_and_a_voice_reference(tmp_path, monkeypatch):
+    import numpy as np
+    import PIL.Image
+
+    model = _ref2va_model()
+    # The released 2048-pixel fit would put a full-size VAE encode inside a fast test; 64 keeps the geometry rule.
+    monkeypatch.setattr(h3_variant, "REFERENCE_IMAGE_SHORT_EDGE", 64)
+    image_path, voice_path = tmp_path / "lucien.png", tmp_path / "voice.wav"
+    PIL.Image.fromarray((np.random.default_rng(0).random((64, 96, 3)) * 255).astype(np.uint8)).save(image_path)
+    write_wav(voice_path, seconds=6.0, rate=32000, channels=1)
+    seen = {}
+    real_build = h3_variant.build_ref2va_packed_sequence
+
+    def spy(*args, **kwargs):
+        seen["layout"] = real_build(*args, **kwargs)
+        return seen["layout"]
+
+    monkeypatch.setattr(h3_variant, "build_ref2va_packed_sequence", spy)
+    references = [H3Reference("image", str(image_path)), H3Reference("audio", str(voice_path))]
+    video = model.generate_video(
+        seed=3,
+        prompt="subject_definitions:\n<Subject 1> is the man in <Picture 1>.",
+        references=references,
+        width=96,
+        height=64,
+        num_frames=124,
+        num_inference_steps=1,
+    )
+    assert video.task == "ref2va" and video.num_frames == 124 and video.frames[0].size == (96, 64)
+    assert abs(video.audio.duration_seconds - 124 / 24) < 1e-3
+    assert video.prompt.startswith("subject_definitions:")  # passed verbatim, never wrapped in the base format
+    layout = seen["layout"]
+    assert layout.num_condition_video_rows == (64 // 32) * (96 // 32)
+    # The 6 s voice is truncated to the 124-frame duration: ceil(165333 / 800) = 207 latents per channel.
+    assert layout.num_condition_audio_rows == 2 * 207
+    assert video.extra_metadata["references"] == [
+        {"kind": "image", "path": str(image_path)},
+        {"kind": "audio", "path": str(voice_path)},
+    ]
+
+
+@pytest.mark.fast
+def test_ref2va_rejects_misrouted_requests():
+    common = dict(seed=1, prompt="x", width=96, height=64, num_frames=124, num_inference_steps=1)
+    refs = [H3Reference("image", "missing.png")]
+    with pytest.raises(ValueError, match="minimax-h3-ref2va"):
+        _tiny_model().generate_video(references=refs, **common)
+    ref2va = _ref2va_model()
+    with pytest.raises(ValueError, match="at least one reference"):
+        ref2va.generate_video(**common)
+    with pytest.raises(ValueError, match="cannot be combined"):
+        ref2va.generate_video(references=refs, image_path="missing.png", **common)
+    with pytest.raises(ValueError, match="--soundscape"):
+        ref2va.generate_video(references=refs, soundscape="wind", **common)
+    with pytest.raises(ValueError, match="paired with at least one image"):
+        ref2va.generate_video(references=[H3Reference("audio", "missing.wav")], **common)
+
+
+@pytest.mark.fast
+def test_peak_estimate_counts_reference_rows():
+    base = MiniMaxH3.estimate_peak_bytes(96, 64, 124, resident_bytes=0)
+    with_refs = MiniMaxH3.estimate_peak_bytes(96, 64, 124, resident_bytes=0, extra_rows=1000)
+    assert with_refs - base == 1000 * MiniMaxH3.PEAK_BYTES_PER_PACKED_ROW

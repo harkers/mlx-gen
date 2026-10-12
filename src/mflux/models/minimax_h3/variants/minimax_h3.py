@@ -7,6 +7,7 @@ visual VAE decode in ImageNet pixel space and the fp32 audio VAE decode at 32 kH
 """
 
 import hashlib
+import math
 import sys
 import time
 from dataclasses import dataclass
@@ -33,14 +34,19 @@ from mflux.models.minimax_h3.latent_creator.h3_layout import (
     MIN_ASPECT_RATIO,
     MIN_DURATION_SECONDS,
     MIN_NUM_FRAMES,
+    PATCH_SIZE,
     PIXEL_MEAN,
     PIXEL_STD,
     TEXT_TAG,
+    VAE_SPATIAL_COMPRESSION,
     VIDEO_TAG,
+    H3ReferenceBlock,
     align_num_frames,
     audio_latent_num_frames,
     build_packed_sequence,
+    build_ref2va_packed_sequence,
     build_row_timesteps,
+    pack_audio_rows,
     packed_sequence_length,
     patchify_video_latents,
     resolve_canvas_size,
@@ -57,7 +63,14 @@ from mflux.models.minimax_h3.model.h3_text_encoder.qwen3_vl_model import (
 )
 from mflux.models.minimax_h3.model.h3_text_encoder.qwen3_vl_vision_model import preprocess_image
 from mflux.models.minimax_h3.scheduler.minimax_h3_scheduler import MiniMaxH3Scheduler
-from mflux.models.minimax_h3.variants.h3_references import AUDIO_REFERENCE
+from mflux.models.minimax_h3.variants.h3_references import (
+    AUDIO_REFERENCE,
+    REFERENCE_IMAGE_SHORT_EDGE,
+    H3Reference,
+    fit_reference_image,
+    load_reference_audio,
+    validate_references,
+)
 from mflux.models.minimax_h3.weights.h3_weight_definition import MiniMaxH3WeightDefinition
 from mflux.utils.generated_audio import GeneratedAudio
 from mflux.utils.generated_video import GeneratedVideo
@@ -159,6 +172,7 @@ class MiniMaxH3(nn.Module):
         video_shift: float | None = None,
         audio_shift: float | None = None,
         image_path: str | None = None,
+        references: list[H3Reference] | None = None,
         soundscape: str | None = None,
         music: str | None = None,
         generate_audio: bool = True,
@@ -166,29 +180,53 @@ class MiniMaxH3(nn.Module):
         release_text_encoder: bool = False,
     ) -> GeneratedVideo:
         started = time.perf_counter()
+        is_ref2va = self.model_config.transformer_overrides.get("task") == "ref2va"
+        self._check_route(is_ref2va, references, image_path, soundscape, music)
         keyframe = self._load_keyframe(image_path) if image_path is not None else None
         plan = self._plan(width, height, num_frames, num_inference_steps, video_shift, audio_shift, keyframe=keyframe)
-        self._preflight_request(plan)
-        full_prompt = compose_prompt(prompt, soundscape, music)
-        task = "image-to-video" if keyframe is not None else "text-to-video"
-        # The keyframe is stretched onto the canvas (the reference's geometry anchor), then conditions both the text
-        # sequence (a `<Picture 1>: ` label plus its vision block) and the packed latent rows.
-        keyframes = [self._fit_keyframe(keyframe, plan.width, plan.height)] if keyframe is not None else []
+        loaded = self._load_references(references, plan) if references else []
+        self._preflight_request(plan, extra_rows=self._reference_rows(loaded))
+        if references:
+            full_prompt = self._ref2va_prompt(prompt)
+            task = "ref2va"
+            # References keep their own geometry; only their order and kind reach the presentation.
+            entries = [item if isinstance(item, PIL.Image.Image) else AUDIO_REFERENCE for item in loaded]
+        else:
+            full_prompt = compose_prompt(prompt, soundscape, music)
+            task = "image-to-video" if keyframe is not None else "text-to-video"
+            # The keyframe is stretched onto the canvas (the reference's geometry anchor), then conditions both the
+            # text sequence (a `<Picture 1>: ` label plus its vision block) and the packed latent rows.
+            entries = [self._fit_keyframe(keyframe, plan.width, plan.height)] if keyframe is not None else []
 
-        prompt_embeds, text_token_tags = self._encode_presentation(full_prompt, keyframes)
+        prompt_embeds, text_token_tags = self._encode_presentation(full_prompt, entries)
         if release_text_encoder:
             self.release_text_encoder()
         text_length = prompt_embeds.shape[1]
-        layout = build_packed_sequence(
-            text_token_tags,
-            plan.num_latent_frames,
-            plan.latent_height,
-            plan.latent_width,
-            plan.num_audio_latents,
-            patch_size=self.transformer.patch_size,
-            audio_channels=AUDIO_CHANNELS,
-            keyframe_anchors=("first",) if keyframes else (),
-        )
+        if references:
+            visual_conditions, audio_conditions, blocks = self._encode_references(loaded)
+            layout = build_ref2va_packed_sequence(
+                text_token_tags,
+                blocks,
+                plan.num_latent_frames,
+                plan.latent_height,
+                plan.latent_width,
+                plan.num_audio_latents,
+                patch_size=self.transformer.patch_size,
+                audio_channels=AUDIO_CHANNELS,
+            )
+        else:
+            visual_conditions = [self._encode_keyframe_latents(entries[0])] if entries else []
+            audio_conditions = []
+            layout = build_packed_sequence(
+                text_token_tags,
+                plan.num_latent_frames,
+                plan.latent_height,
+                plan.latent_width,
+                plan.num_audio_latents,
+                patch_size=self.transformer.patch_size,
+                audio_channels=AUDIO_CHANNELS,
+                keyframe_anchors=("first",) if entries else (),
+            )
         self._emit(progress_callback, phase="start", plan=plan, step=0, seed=seed, task=task)
 
         video_scheduler = MiniMaxH3Scheduler(shift=plan.video_shift)
@@ -196,8 +234,9 @@ class MiniMaxH3(nn.Module):
         video_scheduler.set_timesteps(plan.num_inference_steps)
         audio_scheduler.set_timesteps(plan.num_inference_steps)
 
-        # Draw order matches the reference: conditioning noise first, then the video latents, then the audio rows.
-        keys = mx.random.split(mx.random.key(seed), 3 if keyframes else 2)
+        # Draw order matches the reference: one conditioning draw per visual condition in packed order, then the
+        # video latents, then the audio rows. One keyframe gives the same three-way split as before.
+        keys = mx.random.split(mx.random.key(seed), len(visual_conditions) + 2)
         key_video, key_audio = keys[-2], keys[-1]
         latent_channels = self.transformer.in_channels
         video_latents = mx.random.normal(
@@ -206,19 +245,22 @@ class MiniMaxH3(nn.Module):
             dtype=mx.float32,
         )
         video_rows = patchify_video_latents(video_latents, self.transformer.patch_size)
-        if keyframes:
-            condition = self._encode_keyframe_latents(keyframes[0])
-            condition_noise = mx.random.normal(condition.shape, key=keys[0], dtype=mx.float32)
+        condition_rows = []
+        for index, condition in enumerate(visual_conditions):
+            condition_noise = mx.random.normal(condition.shape, key=keys[index], dtype=mx.float32)
             # The anchor is not fully clean: the released model holds it at `t = 0.999` for every step.
             noised = video_scheduler.scale_noise(condition, KEYFRAME_NOISE_AUG, condition_noise)
-            video_rows = mx.concatenate(
-                [patchify_video_latents(noised, self.transformer.patch_size), video_rows], axis=0
-            )
+            condition_rows.append(patchify_video_latents(noised, self.transformer.patch_size))
+        if condition_rows:
+            video_rows = mx.concatenate(condition_rows + [video_rows], axis=0)
         audio_rows = mx.random.normal(
             (plan.num_audio_latents * AUDIO_CHANNELS, self.transformer.audio_in_channels),
             key=key_audio,
             dtype=mx.float32,
         )
+        # Reference soundtracks ride along clean, pinned at `t = 1.0` by `build_row_timesteps`.
+        if audio_conditions:
+            audio_rows = mx.concatenate(audio_conditions + [audio_rows], axis=0)
 
         num_condition_video_rows = layout.num_condition_video_rows
         num_condition_audio_rows = layout.num_condition_audio_rows
@@ -298,6 +340,11 @@ class MiniMaxH3(nn.Module):
                 "requested_frames": plan.requested_frames,
                 "text_tokens": int(text_length),
                 "generate_audio": bool(generate_audio),
+                **(
+                    {"references": [{"kind": reference.kind, "path": reference.path} for reference in references]}
+                    if references
+                    else {}
+                ),
             },
             audio=audio,
         )
@@ -511,6 +558,101 @@ class MiniMaxH3(nn.Module):
         mx.eval(latents)
         return latents
 
+    @staticmethod
+    def _check_route(
+        is_ref2va: bool,
+        references: list[H3Reference] | None,
+        image_path: str | None,
+        soundscape: str | None,
+        music: str | None,
+    ) -> None:
+        """Refuse a request the loaded transformer cannot serve, before any file is opened."""
+        if references and not is_ref2va:
+            raise ValueError("References need the Ref2VA transformer: run them on `minimax-h3-ref2va`.")
+        if is_ref2va and not references:
+            raise ValueError("`minimax-h3-ref2va` needs at least one reference; use `minimax-h3` for text-to-video.")
+        if not references:
+            return
+        if image_path is not None:
+            raise ValueError(
+                "References and an image_path keyframe cannot be combined: Ref2VA has no keyframe anchors."
+            )
+        if (soundscape and soundscape.strip()) or (music and music.strip()):
+            raise ValueError(
+                "A Ref2VA prompt carries its own `overall_soundscape:` and `non_diegetic_music:` sections; "
+                "drop --soundscape / --music and write them into the prompt."
+            )
+        validate_references(references)
+
+    @staticmethod
+    def _ref2va_prompt(prompt: str) -> str:
+        """Ref2VA prompts are passed verbatim: the model was trained on MiniMax's six-section full-reference format."""
+        text = prompt.strip()
+        if not any(line.lstrip().startswith("subject_definitions:") for line in text.splitlines()):
+            print(
+                "⚠️  MiniMax-H3 Ref2VA was trained on the full-reference prompt (subject_definitions, summary, "
+                "retention_analysis, detailed_description, overall_soundscape, non_diegetic_music); this prompt has "
+                "no `subject_definitions:` section.",
+                file=sys.stderr,
+            )
+        return text
+
+    def _load_references(
+        self, references: list[H3Reference], plan: H3GenerationPlan
+    ) -> list[PIL.Image.Image | np.ndarray]:
+        """Decode and normalise every reference in request order: images fitted, audio truncated to the clip."""
+        return [
+            fit_reference_image(self._load_keyframe(reference.path), REFERENCE_IMAGE_SHORT_EDGE)
+            if reference.kind == "image"
+            else load_reference_audio(reference.path, self.audio_vae.sampling_rate, plan.num_frames / FPS)
+            for reference in references
+        ]
+
+    def _reference_rows(self, loaded: list[PIL.Image.Image | np.ndarray]) -> int:
+        """Packed rows the references add, known before anything is encoded."""
+        stride = VAE_SPATIAL_COMPRESSION * PATCH_SIZE
+        rows = 0
+        for item in loaded:
+            if isinstance(item, PIL.Image.Image):
+                rows += (item.height // stride) * (item.width // stride)
+            else:
+                rows += AUDIO_CHANNELS * math.ceil(item.shape[1] / self.audio_vae.hop_length)
+        return rows
+
+    def _encode_reference_audio(self, waveform: np.ndarray) -> mx.array:
+        """Stereo `(2, samples)` to clean, normalised, channel-major rows `(2 * T, C)`: the channels are two batch
+        items of the mono audio VAE, and the posterior mean is taken, never sampled."""
+        latents = self.audio_vae.encode(mx.array(waveform, dtype=mx.float32)[:, None, :])  # (2, C, T)
+        latents = (latents - self.audio_vae.latents_mean.reshape(1, -1, 1)) / self.audio_vae.latents_std.reshape(
+            1, -1, 1
+        )
+        rows = pack_audio_rows(latents)
+        mx.eval(rows)
+        return rows
+
+    def _encode_references(
+        self, loaded: list[PIL.Image.Image | np.ndarray]
+    ) -> tuple[list[mx.array], list[mx.array], list[H3ReferenceBlock]]:
+        """Visual condition latents, audio condition rows and layout blocks, each in request order."""
+        ratio = self.vae.spatial_compression_ratio
+        visual, audio, blocks = [], [], []
+        for item in loaded:
+            if isinstance(item, PIL.Image.Image):
+                visual.append(self._encode_keyframe_latents(item))
+                blocks.append(
+                    H3ReferenceBlock(
+                        kind="image",
+                        latent_frames=1,
+                        latent_height=item.height // ratio,
+                        latent_width=item.width // ratio,
+                    )
+                )
+            else:
+                rows = self._encode_reference_audio(item)
+                audio.append(rows)
+                blocks.append(H3ReferenceBlock(kind="audio", num_audio_latents=rows.shape[0] // AUDIO_CHANNELS))
+        return visual, audio, blocks
+
     # ------------------------------------------------------------------ decoding
 
     def _decode_video(self, video_rows: mx.array, plan: H3GenerationPlan) -> list[PIL.Image.Image]:
@@ -558,19 +700,22 @@ class MiniMaxH3(nn.Module):
     PEAK_BYTES_PER_PACKED_ROW = 271_356
 
     @classmethod
-    def estimate_peak_bytes(cls, width: int, height: int, num_frames: int, *, resident_bytes: int) -> int:
+    def estimate_peak_bytes(
+        cls, width: int, height: int, num_frames: int, *, resident_bytes: int, extra_rows: int = 0
+    ) -> int:
         """Expected peak process footprint for a request, given what is already resident.
 
         Anchored on a measured footprint rather than on a constant for the released weights, so the
         estimate follows whatever is actually loaded rather than assuming one model. Above that
         baseline a run adds the MLX free-buffer cache, which fills toward its limit, and a term
-        linear in packed rows. Reproduces all three measured runs within 0.5 GiB.
+        linear in packed rows. Reproduces all three measured runs within 0.5 GiB. `extra_rows` adds rows outside
+        the base layout, e.g. Ref2VA references.
         """
         cache_bytes = RuntimeMemory.resolve_cache_limit_bytes(None) or 0
-        rows = packed_sequence_length(width, height, num_frames)
+        rows = packed_sequence_length(width, height, num_frames) + extra_rows
         return int(resident_bytes + cache_bytes + cls.PEAK_BYTES_PER_PACKED_ROW * rows)
 
-    def _preflight_request(self, plan: H3GenerationPlan) -> None:
+    def _preflight_request(self, plan: H3GenerationPlan, extra_rows: int = 0) -> None:
         """Report before a long run whose expected peak does not fit, rather than after.
 
         The expected peak is a measured line through packed rows, not a guarantee: whether a run
@@ -585,7 +730,9 @@ class MiniMaxH3(nn.Module):
         resident_bytes = snapshot.darwin_physical_footprint_bytes or snapshot.process_rss_bytes or 0
         if resident_bytes <= 0:
             return
-        expected = self.estimate_peak_bytes(plan.width, plan.height, plan.num_frames, resident_bytes=resident_bytes)
+        expected = self.estimate_peak_bytes(
+            plan.width, plan.height, plan.num_frames, resident_bytes=resident_bytes, extra_rows=extra_rows
+        )
         gib = 1024**3
         shape = (
             f"{plan.width}x{plan.height} at {plan.num_frames} frames needs about {expected / gib:.0f} GiB, "

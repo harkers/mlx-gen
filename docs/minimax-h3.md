@@ -362,8 +362,8 @@ counts (`lora_application_reports`).
 
 ## Current Limits
 
-- **Reference-to-video (Ref2VA) and the closing keyframe (`last_image`) are not available yet.**
-  Text-to-video and first-frame image-to-video are.
+- **The closing keyframe (`last_image`) is not available yet.** Text-to-video and first-frame
+  image-to-video are. Reference-to-video is experimental (see [below](#reference-to-video-ref2va-experimental)).
 - No published MLX-Gen package yet: `--quantize 8` quantizes at load time, or `mlxgen prepare` writes a
   local 75 GB package (see [Prepared Package](#prepared-package)).
 - The 768p canvas is slow on Apple Silicon (about 5 minutes per step); use the 544p adapter to
@@ -371,6 +371,38 @@ counts (`lora_application_reports`).
 - MiniMax-H3 is released under the MiniMax H3 Community License, which restricts use in some
   territories. Read the license on the model card before you download or distribute weights or
   outputs.
+
+## Reference-To-Video (Ref2VA, experimental)
+
+`minimax-h3-ref2va` runs the released Ref2VA transformer (`transformer_ref/`, 61.7 GB, downloaded on first
+use; the text encoder and both VAEs are shared with `minimax-h3`). It conditions on an ordered list of reference
+images and audio clips instead of a keyframe. Python API only for now; the CLI and capabilities follow.
+
+```python
+from mflux.models.common.config import ModelConfig
+from mflux.models.minimax_h3.variants.h3_references import H3Reference
+from mflux.models.minimax_h3.variants.minimax_h3 import MiniMaxH3
+
+model = MiniMaxH3(model_config=ModelConfig.minimax_h3_ref2va(), quantize=8)
+video = model.generate_video(
+    seed=42,
+    prompt=open("ref2va_prompt.txt").read(),  # MiniMax's six-section full-reference format
+    references=[H3Reference("image", "subject.png"), H3Reference("audio", "voice.wav")],
+    width=960,
+    height=544,
+    num_frames=124,
+)
+```
+
+- **Order matters.** References are labelled `<Picture i>` / `<Audio j>` in the order given and laid out
+  on the rotary clock in that order; the prompt refers to them by those labels.
+- **Images** are resized to their own 2048-pixel short edge (LANCZOS), not to the output canvas, so
+  each one adds about 7,000 packed rows to the request. Up to 9.
+- **Audio** is decoded to 32 kHz stereo (mono is copied to both channels) and truncated to the clip's
+  duration; at least 2 seconds, up to 3 clips, and only alongside at least one image.
+- No Turbo adapter exists for Ref2VA: 50 steps by default.
+- **Not yet validated on the released weights.** The layout, presentation and conditioning port the diffusers
+  `ref2va` workflow and are covered by tiny-model tests only.
 
 ## Verification
 
