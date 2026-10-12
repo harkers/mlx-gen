@@ -14,6 +14,7 @@ from mflux.cli.runtime_events import CliRuntimeEventStream, cli_print
 from mflux.cli.seed_values import resolve_seed_values
 from mflux.models.common.config import ModelConfig
 from mflux.models.common.lora.mapping.lora_loader import LoRALoader
+from mflux.models.minimax_h3.variants.h3_references import H3Reference
 from mflux.models.minimax_h3.variants.minimax_h3 import MiniMaxH3
 from mflux.utils.exceptions import ModelConfigError, PromptFileReadError
 from mflux.utils.prompt_util import PromptUtil
@@ -34,6 +35,18 @@ def main() -> None:
 
     try:
         model_config, model_path = _resolve_model(args.model, args.base_model)
+        references = _references(args)
+        # Every request check runs before the model load: a misspelt path should not cost a minute of loading.
+        MiniMaxH3._check_route(
+            model_config.transformer_overrides.get("task") == "ref2va",
+            references,
+            args.image_path,
+            args.soundscape,
+            args.music,
+        )
+        for reference in references:
+            if not Path(reference.path).is_file():
+                raise FileNotFoundError(f"Reference {reference.kind} not found: {reference.path}")
         if model_path is not None:
             cli_print(
                 f"Loading {model_path} as {model_config.aliases[0]} (base model {model_config.base_model}).",
@@ -68,6 +81,7 @@ def main() -> None:
                     video_shift=args.video_shift,
                     audio_shift=args.audio_shift,
                     image_path=args.image_path,
+                    references=references or None,
                     generate_audio=not args.no_audio,
                     # Low-RAM mode uses this model's own lever; the flag stays available on its own.
                     release_text_encoder=args.release_text_encoder or args.low_ram,
@@ -97,7 +111,7 @@ def main() -> None:
                 gc.collect()
                 mx.clear_cache()
             except Exception as exc:
-                events.emit_failed(task="text-to-video", error=exc, diagnostics_path=None)
+                events.emit_failed(task="ref2va" if references else "text-to-video", error=exc, diagnostics_path=None)
                 raise
             finally:
                 progress.close()
@@ -121,6 +135,13 @@ def _resolve_model(model: str, base_model: str | None = None) -> tuple[ModelConf
     return model_config, model_path
 
 
+def _references(args: argparse.Namespace) -> list[H3Reference]:
+    """Ref2VA references in the order the model reads them: every image, then every audio clip, each in argv order."""
+    return [H3Reference("image", path) for path in args.reference_image_paths or []] + [
+        H3Reference("audio", path) for path in args.reference_audio_paths or []
+    ]
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mlxgen-generate-minimax-h3",
@@ -131,13 +152,16 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--model", "-m", required=True, help="minimax-h3, minimax-h3-turbo, a Hugging Face repo, or a local path."
+        "--model",
+        "-m",
+        required=True,
+        help="minimax-h3, minimax-h3-turbo, minimax-h3-ref2va, a Hugging Face repo, or a local path.",
     )
     parser.add_argument(
         "--base-model",
         type=str,
         default=None,
-        help="Catalog entry a prepared package or repo id runs as (minimax-h3, minimax-h3-turbo, minimax-h3-turbo-544p).",
+        help="Catalog entry a prepared package or repo id runs as (minimax-h3, minimax-h3-turbo, minimax-h3-turbo-544p, minimax-h3-ref2va).",
     )
     prompt_group = parser.add_mutually_exclusive_group()
     prompt_group.add_argument("--prompt", type=str, help="Visual description (or a complete structured H3 prompt).")
@@ -146,10 +170,27 @@ def _parser() -> argparse.ArgumentParser:
         "--soundscape", type=str, default=None, help="`overall_soundscape` section: diegetic sound design."
     )
     parser.add_argument("--music", type=str, default=None, help="`non_diegetic_music` section: score description.")
-    parser.add_argument(
+    conditioning = parser.add_mutually_exclusive_group()
+    conditioning.add_argument(
         "--image-path",
         default=None,
         help="Keyframe the video starts from (image-to-video). The canvas follows its aspect ratio unless --width/--height are given.",
+    )
+    conditioning.add_argument(
+        "--reference-image",
+        dest="reference_image_paths",
+        action="append",
+        default=None,
+        help="minimax-h3-ref2va: a reference image, labelled <Picture 1>, <Picture 2>, ... in the order given. "
+        "Repeatable, up to 9.",
+    )
+    parser.add_argument(
+        "--reference-audio",
+        dest="reference_audio_paths",
+        action="append",
+        default=None,
+        help="minimax-h3-ref2va: a reference audio clip (2-15 s, e.g. a voice to speak in), labelled <Audio 1>, ... "
+        "Repeatable, up to 3; needs at least one --reference-image. Images are always read before audio clips.",
     )
     parser.add_argument(
         "--width", type=int, default=None, help="Canvas width, multiple of 32 (default: 16:9 at 768p short edge)."

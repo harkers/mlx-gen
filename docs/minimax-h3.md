@@ -376,7 +376,18 @@ counts (`lora_application_reports`).
 
 `minimax-h3-ref2va` runs the released Ref2VA transformer (`transformer_ref/`, 61.7 GB, downloaded on first
 use; the text encoder and both VAEs are shared with `minimax-h3`). It conditions on an ordered list of reference
-images and audio clips instead of a keyframe. Python API only for now; the CLI and capabilities follow.
+images and audio clips instead of a keyframe. From the command line:
+
+```bash
+mlxgen generate --model minimax-h3-ref2va --quantize 8 \
+  --reference-image subject.png --reference-audio voice.wav \
+  --prompt-file ref2va_prompt.txt --width 960 --height 544 --frames 124 --output clip.mp4
+```
+
+All `--reference-image` files come first, then all `--reference-audio` files, each in the order given;
+use the Python API below to interleave them. `--soundscape` / `--music` and `--image-path` do not apply.
+
+From Python:
 
 ```python
 from mflux.models.common.config import ModelConfig
