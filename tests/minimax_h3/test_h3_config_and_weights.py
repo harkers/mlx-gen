@@ -619,3 +619,22 @@ def test_ref2va_route_reads_the_reference_transformer():
     assert "transformer/*.safetensors" in base.get_download_patterns()
     # Called unbound (as some loaders do), the definition still describes the base checkpoint.
     assert "transformer/*.safetensors" in MiniMaxH3WeightDefinition.get_download_patterns()
+
+
+@pytest.mark.fast
+def test_ref2va_capabilities_publish_one_reference_route():
+    ref2va = ModelConfig.minimax_h3_ref2va()
+    capabilities = get_model_capabilities(model="minimax-h3-ref2va", model_config=ref2va).to_dict()
+    assert capabilities["family"] == "minimax-h3" and capabilities["label"] == "MiniMax-H3 Ref2VA"
+    (row,) = capabilities["capabilities"]
+    assert row["id"] == "minimax-h3.ref2va" and row["handler_id"] == "minimax-h3.generate"
+    assert row["public_task"] == "text-to-video" and row["mode"] == "reference-video"
+    assert row["min_reference_images"] == 1 and row["max_reference_images"] == 9
+    assert row["min_images"] == 0 and row["max_images"] == 0
+    assert row["supports_lora"] is False and row["generates_audio"] is True
+    # The FL2VA memory measurements do not describe this transformer's runs.
+    assert row["measured_runs"] == [] and row["max_validated_frames"] is None
+    assert [section["label"] for section in row["prompt_sections"]] == ["subject_definitions"]
+    # The base entries are untouched.
+    base = get_model_capabilities(model="minimax-h3", model_config=ModelConfig.minimax_h3()).to_dict()
+    assert [row["id"] for row in base["capabilities"]] == ["minimax-h3.text-video", "minimax-h3.first-frame"]

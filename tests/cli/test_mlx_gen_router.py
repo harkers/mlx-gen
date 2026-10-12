@@ -7493,3 +7493,51 @@ def test_minimax_h3_local_path_forwards_base_model():
         "minimax-h3-turbo-544p",
     ]
     assert invocation.argv[-2:] == ["--prompt", "hello"]
+
+
+def test_router_forwards_ref2va_references():
+    invocation = mlx_gen._resolve_invocation(
+        [
+            "--model",
+            "minimax-h3-ref2va",
+            "--reference-image",
+            "lucien.png",
+            "--reference-audio",
+            "burton.wav",
+            "--prompt",
+            "subject_definitions: x",
+        ]
+    )
+    assert invocation.target_name == "mlxgen-generate-minimax-h3"
+    argv = invocation.argv
+    assert "--image-path" not in argv
+    assert argv[argv.index("--reference-image") + 1] == "lucien.png"
+    # Not a router option: it rides through as a forwarded backend argument.
+    assert argv[argv.index("--reference-audio") + 1] == "burton.wav"
+
+    prepared = mlx_gen._resolve_invocation(
+        [
+            "--model",
+            "models/minimax-h3-ref2va-8bit",
+            "--base-model",
+            "minimax-h3-ref2va",
+            "--reference-image",
+            "lucien.png",
+            "--prompt",
+            "x",
+        ]
+    )
+    assert prepared.target_name == "mlxgen-generate-minimax-h3"
+    assert prepared.argv[prepared.argv.index("--base-model") + 1] == "minimax-h3-ref2va"
+    assert prepared.argv[prepared.argv.index("--reference-image") + 1] == "lucien.png"
+
+
+def test_router_refuses_references_on_the_base_model(capsys):
+    with pytest.raises(SystemExit):
+        mlx_gen._resolve_invocation(["--model", "minimax-h3", "--reference-image", "a.png", "--prompt", "x"])
+    assert "--reference-image" in capsys.readouterr().err
+
+
+def test_router_refuses_ref2va_without_references():
+    with pytest.raises(SystemExit):
+        mlx_gen._resolve_invocation(["--model", "minimax-h3-ref2va", "--prompt", "x"])

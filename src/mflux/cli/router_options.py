@@ -243,8 +243,8 @@ ROUTER_OPTIONS: tuple[RouterOption, ...] = (
             "action": "append",
             "default": None,
             "help": (
-                "Repeatable reference-image conditioning for exact model routes such as Wan VACE "
-                "and Bernini-R. Reference images do not occupy the primary --image task slot."
+                "Repeatable reference-image conditioning for exact model routes such as Wan VACE, "
+                "Bernini-R and MiniMax-H3 Ref2VA. Reference images do not occupy the primary --image task slot."
             ),
         },
         metadata_keys=("reference_image_paths",),

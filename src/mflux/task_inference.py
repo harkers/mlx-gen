@@ -2046,6 +2046,19 @@ MINIMAX_H3_PROMPT_SECTIONS = (
 )
 
 
+# Ref2VA prompts are MiniMax's six-section full-reference format, written whole into --prompt; the
+# soundscape and music sections live inside it, so the base model's --soundscape / --music do not apply.
+MINIMAX_H3_REF2VA_PROMPT_SECTIONS = (
+    PromptSection(
+        key="description",
+        label="subject_definitions",
+        option="--prompt",
+        parameter="prompt",
+        role="picture",
+        required=True,
+    ),
+)
+
 # Measured runs on an Apple M5 Max with 128 GiB, at q8 with the default 8 GiB cache limit and the
 # conditioner resident. Peak follows the packed row count rather than the canvas or the frame count
 # separately: the 243-frame `960x544` run and the 124-frame `1344x768` run differ by 0.5% in rows and
@@ -2143,6 +2156,8 @@ def _minimax_h3_capabilities(identity: _ModelIdentity) -> ModelCapabilities:
     # no negative prompt, LoRA on the single transformer (the lightx2v Turbo adapters). First-frame
     # conditioning lands with the Qwen3-VL vision tower.
     overrides = identity.model_config.transformer_overrides if identity.model_config is not None else {}
+    if overrides.get("task") == "ref2va":
+        return _minimax_h3_ref2va_capabilities(identity, overrides)
     is_turbo = bool(overrides.get("turbo_lora"))
     # The two Turbo entries differ only in the canvas their adapter was trained for, and that choice is
     # the difference between an 11-minute and a 34-minute clip, so the label has to name it.
@@ -2199,6 +2214,40 @@ def _minimax_h3_capabilities(identity: _ModelIdentity) -> ModelCapabilities:
                     supports_lora=True,
                     lora_target_roles=("transformer",),
                 ),
+            ),
+        ),
+    )
+
+
+def _minimax_h3_ref2va_capabilities(identity: _ModelIdentity, overrides: dict) -> ModelCapabilities:
+    # Reference-to-video: its own transformer (`transformer_ref/`), conditioned on ordered reference images
+    # (repeatable --reference-image) and audio clips (repeatable --reference-audio on the backend). It has no
+    # keyframe route and no Turbo adapter, and none of the FL2VA memory measurements describe it.
+    shared = {
+        **_minimax_h3_shared_capability_kwargs(overrides),
+        "prompt_sections": MINIMAX_H3_REF2VA_PROMPT_SECTIONS,
+        "measured_runs": (),
+        "max_validated_frames": None,
+    }
+    return ModelCapabilities(
+        schema_version=CAPABILITIES_SCHEMA_VERSION,
+        family=identity.family,
+        label="MiniMax-H3 Ref2VA",
+        model_name=identity.model_name,
+        capabilities=(
+            GenerationCapability(
+                id="minimax-h3.ref2va",
+                public_task=TEXT_TO_VIDEO,
+                mode=MODE_REFERENCE_VIDEO,
+                handler_id="minimax-h3.generate",
+                min_reference_images=1,
+                max_reference_images=9,
+                supports_frames=True,
+                supports_fps=False,
+                default_for_task=True,
+                dimension_multiple=32,
+                **shared,
+                **_lora_capability_kwargs(identity=identity, capability_id="minimax-h3.ref2va", supports_lora=False),
             ),
         ),
     )
