@@ -319,6 +319,10 @@ class ModelConfig:
         return AVAILABLE_MODELS["minimax-h3-turbo-544p"]
 
     @staticmethod
+    def minimax_h3_ref2va() -> "ModelConfig":
+        return AVAILABLE_MODELS["minimax-h3-ref2va"]
+
+    @staticmethod
     @lru_cache
     def wan2_2_i2v_a14b() -> "ModelConfig":
         return AVAILABLE_MODELS["wan2.2-i2v-a14b"]
@@ -943,6 +947,35 @@ AVAILABLE_MODELS = {
             "default_video_shift": 12.0,
             "default_audio_shift": 3.0,
             "turbo_lora": "hf:lightx2v/Minimax-h3-Turbo/minimax_h3_fl2v_turbo_8step_v1.0_bf16.safetensors",
+        },
+        text_encoder_overrides={"model_type": "qwen3_vl", "hidden_size": 5120, "num_layers": 50},
+    ),
+    "minimax-h3-ref2va": ModelConfig(
+        priority=33,
+        aliases=["minimax-h3-ref2va", "h3-ref2va"],
+        model_name="MiniMaxAI/MiniMax-H3",
+        base_model=None,
+        controlnet_model=None,
+        custom_transformer_model=None,
+        num_train_steps=1000,
+        max_sequence_length=8192,
+        supports_guidance=False,
+        requires_sigma_shift=False,
+        inference_aliases=["minimax-h3-ref2va"],
+        transformer_overrides={
+            # Reference-to-video: the same DiT architecture with its own weights (`transformer_ref/`), conditioned
+            # on an ordered list of reference images and audio clips. No Turbo adapter exists for it.
+            "task": "ref2va",
+            "transformer_subdir": "transformer_ref",
+            "generates_audio": True,
+            "supports_image_to_video": False,
+            "default_frames": 124,
+            "default_steps": 50,
+            "default_fps": 24,
+            "default_width": 1344,
+            "default_height": 768,
+            "default_video_shift": 12.0,
+            "default_audio_shift": 3.0,
         },
         text_encoder_overrides={"model_type": "qwen3_vl", "hidden_size": 5120, "num_layers": 50},
     ),

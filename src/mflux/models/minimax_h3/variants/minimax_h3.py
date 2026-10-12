@@ -318,11 +318,12 @@ class MiniMaxH3(nn.Module):
             model=self,
             bits=self.bits,
             base_path=base_path,
-            weight_definition=getattr(
-                self, "weight_definition", MiniMaxH3WeightDefinition.for_config(self.model_config)
-            ),
+            weight_definition=self._weight_definition(),
         )
         self._copy_runtime_assets(base_path)
+
+    def _weight_definition(self) -> MiniMaxH3WeightDefinition:
+        return getattr(self, "weight_definition", None) or MiniMaxH3WeightDefinition.for_config(self.model_config)
 
     def _copy_runtime_assets(self, base_path: str) -> None:
         """Component configs travel with a prepared package so a reload rebuilds the exact released shapes."""
@@ -334,7 +335,7 @@ class MiniMaxH3(nn.Module):
             "model_index.json",
             "vae/config.json",
             "audio_vae/config.json",
-            "transformer/config.json",
+            f"{self._weight_definition().transformer_subdir}/config.json",
             "text_encoder/config.json",
         ):
             source = root / relative

@@ -33,6 +33,11 @@ class MiniMaxH3WeightDefinition:
     def for_config(model_config: ModelConfig) -> "MiniMaxH3WeightDefinition":
         return MiniMaxH3WeightDefinition(model_config)
 
+    @property
+    def transformer_subdir(self) -> str:
+        """`transformer_ref` for the Ref2VA route, `transformer` otherwise; the other components are shared."""
+        return str(self.model_config.transformer_overrides.get("transformer_subdir", "transformer"))
+
     def get_components(self=None) -> List[ComponentDefinition]:
         if isinstance(self, MiniMaxH3WeightDefinition):
             return self.components()
@@ -52,7 +57,7 @@ class MiniMaxH3WeightDefinition:
             ),
             ComponentDefinition(
                 name="transformer",
-                hf_subdir="transformer",
+                hf_subdir=self.transformer_subdir,
                 loading_mode="multi_glob",
                 precision=ModelConfig.precision,
                 precision_override=MiniMaxH3WeightDefinition.transformer_precision_override,
@@ -127,6 +132,7 @@ class MiniMaxH3WeightDefinition:
         ]
 
     def get_download_patterns(self=None) -> List[str]:
+        subdir = self.transformer_subdir if isinstance(self, MiniMaxH3WeightDefinition) else "transformer"
         return [
             "model_index.json",
             "modular_model_index.json",
@@ -134,8 +140,8 @@ class MiniMaxH3WeightDefinition:
             "audio_scheduler/*.json",
             "text_encoder/*.safetensors",
             "text_encoder/*.json",
-            "transformer/*.safetensors",
-            "transformer/*.json",
+            f"{subdir}/*.safetensors",
+            f"{subdir}/*.json",
             "vae/*.safetensors",
             "vae/*.json",
             "audio_vae/*.safetensors",

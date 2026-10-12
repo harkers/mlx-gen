@@ -593,3 +593,29 @@ def test_measured_runs_publish_outcomes_and_their_conditions():
         # The grid bound and the evidence bound are different questions.
         assert row["max_frames"] == 345 and row["max_validated_frames"] == 124
         assert row["peak_bytes_per_packed_row"] == 271_356 and row["peak_bytes_fixed"] == 89_410_000_000
+
+
+@pytest.mark.fast
+def test_ref2va_route_reads_the_reference_transformer():
+    ref2va = ModelConfig.from_name("minimax-h3-ref2va")
+    assert ref2va.aliases[0] == "minimax-h3-ref2va" and ref2va.model_name == "MiniMaxAI/MiniMax-H3"
+    assert ModelConfig.minimax_h3_ref2va().aliases[0] == "minimax-h3-ref2va"
+    assert ModelConfig.from_name("h3-ref2va").aliases[0] == "minimax-h3-ref2va"
+    overrides = ref2va.transformer_overrides
+    assert overrides["task"] == "ref2va" and overrides["default_steps"] == 50
+    assert overrides["default_video_shift"] == 12.0 and overrides["default_audio_shift"] == 3.0
+    assert overrides["supports_image_to_video"] is False and "turbo_lora" not in overrides
+
+    definition = MiniMaxH3WeightDefinition.for_config(ref2va)
+    assert definition.transformer_subdir == "transformer_ref"
+    transformer = next(c for c in definition.get_components() if c.name == "transformer")
+    assert transformer.hf_subdir == "transformer_ref"
+    patterns = definition.get_download_patterns()
+    assert {"transformer_ref/*.safetensors", "transformer_ref/*.json"} <= set(patterns)
+    assert not any(pattern.startswith("transformer/") for pattern in patterns)
+
+    base = MiniMaxH3WeightDefinition.for_config(ModelConfig.minimax_h3())
+    assert next(c for c in base.get_components() if c.name == "transformer").hf_subdir == "transformer"
+    assert "transformer/*.safetensors" in base.get_download_patterns()
+    # Called unbound (as some loaders do), the definition still describes the base checkpoint.
+    assert "transformer/*.safetensors" in MiniMaxH3WeightDefinition.get_download_patterns()
