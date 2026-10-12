@@ -8,9 +8,11 @@ from mflux.models.minimax_h3.latent_creator.h3_layout import (
     AUDIO_TAG,
     TEXT_TAG,
     VIDEO_TAG,
+    H3ReferenceBlock,
     align_num_frames,
     audio_latent_num_frames,
     build_packed_sequence,
+    build_ref2va_packed_sequence,
     build_row_timesteps,
     pack_audio_rows,
     patchify_video_latents,
@@ -157,3 +159,70 @@ def test_compose_prompt_rejects_a_section_the_prompt_already_carries():
     composed = compose_prompt(prose, soundscape="birds")
     assert prompt_sections_present(composed) == ("integrated_multimodal_description", "overall_soundscape")
     assert composed.endswith("overall_soundscape: birds")
+
+
+@pytest.mark.fast
+def test_ref2va_layout_packs_references_in_request_order_and_advances_the_clock():
+    tags_in = np.full((5,), TEXT_TAG, dtype=np.int32)
+    image = H3ReferenceBlock(kind="image", latent_frames=1, latent_height=8, latent_width=4)  # 4 * 2 = 8 rows
+    voice = H3ReferenceBlock(kind="audio", num_audio_latents=3)  # 3 * 2 channels = 6 rows
+    layout = build_ref2va_packed_sequence(tags_in, [image, voice], 7, 4, 6, 8)
+
+    target_video_rows = 7 * 2 * 3
+    assert layout.sequence_length == 5 + 8 + 6 + 16 + target_video_rows
+    assert layout.num_condition_video_rows == 8 and layout.num_condition_audio_rows == 6
+    video_idx, audio_idx = np.array(layout.video_indices), np.array(layout.audio_indices)
+    # [text 0-4 | image 5-12 | voice 13-18 | target audio 19-34 | target video 35-]
+    assert video_idx[:8].tolist() == list(range(5, 13))
+    assert audio_idx[:6].tolist() == list(range(13, 19))
+    assert audio_idx[6:].tolist() == list(range(19, 35))
+    assert video_idx[8:].tolist() == list(range(35, layout.sequence_length))
+
+    t = np.array(layout.position_ids)[:, 0]
+    assert np.allclose(t[5:13], 5.0)  # an image takes one rotary slot at the text length
+    assert np.allclose(t[13:16], [6, 7, 8]) and np.allclose(t[16:19], [6, 7, 8])  # voice, per channel
+    assert np.allclose(t[19:27], 9 + np.arange(8))  # target audio starts where the references leave the clock
+    assert np.isclose(t[35], 9.0)  # target video shares that origin
+    tags = np.array(layout.token_tags)
+    assert (tags[video_idx] == VIDEO_TAG).all() and (tags[audio_idx] == AUDIO_TAG).all()
+    assert (tags[:5] == TEXT_TAG).all()
+
+    # Order is semantic: audio first moves the voice to the front of the clock.
+    swapped = build_ref2va_packed_sequence(tags_in, [voice, image], 7, 4, 6, 8)
+    t_swapped = np.array(swapped.position_ids)[:, 0]
+    assert np.allclose(t_swapped[5:8], [5, 6, 7]) and np.allclose(t_swapped[11:19], 8.0)
+    assert np.isclose(t_swapped[np.array(swapped.audio_indices)[6]], 9.0)
+
+
+@pytest.mark.fast
+def test_ref2va_row_timesteps_pin_each_reference_kind():
+    image = H3ReferenceBlock(kind="image", latent_frames=1, latent_height=8, latent_width=4)
+    voice = H3ReferenceBlock(kind="audio", num_audio_latents=3)
+    layout = build_ref2va_packed_sequence(np.full((5,), TEXT_TAG, dtype=np.int32), [image, voice], 7, 4, 6, 8)
+    unique, inverse = build_row_timesteps(layout, 0.2, 0.5, 0.999, 1.0)
+    rows = np.array(unique)[np.array(inverse)]
+    video_idx, audio_idx = np.array(layout.video_indices), np.array(layout.audio_indices)
+    assert np.allclose(rows[video_idx[:8]], 0.999) and np.allclose(rows[video_idx[8:]], 0.2)
+    assert np.allclose(rows[audio_idx[:6]], 1.0) and np.allclose(rows[audio_idx[6:]], 0.5)
+
+
+@pytest.mark.fast
+def test_ref2va_layout_without_references_matches_the_text_only_layout():
+    tags_in = np.full((5,), TEXT_TAG, dtype=np.int32)
+    text_only = build_packed_sequence(tags_in, 7, 4, 6, 8)
+    no_refs = build_ref2va_packed_sequence(tags_in, [], 7, 4, 6, 8)
+    for field in ("position_ids", "token_tags", "video_indices", "audio_indices", "text_indices"):
+        assert np.array_equal(np.array(getattr(text_only, field)), np.array(getattr(no_refs, field))), field
+    positions, audio_idx = np.array(text_only.position_ids), np.array(text_only.audio_indices)
+    assert np.allclose(positions[audio_idx[:8], 0], 5 + np.arange(8))
+    assert np.allclose(positions[audio_idx[8:], 0], 5 + np.arange(8))
+    assert len(set(positions[audio_idx[:8], 2].tolist())) == 1
+    assert positions[audio_idx[0], 2] < positions[audio_idx[8], 2]
+
+
+@pytest.mark.fast
+def test_ref2va_layout_rejects_unknown_reference_kinds():
+    with pytest.raises(ValueError, match="'image' or an 'audio'"):
+        build_ref2va_packed_sequence(
+            np.full((5,), TEXT_TAG, dtype=np.int32), [H3ReferenceBlock(kind="video")], 7, 4, 6, 8
+        )

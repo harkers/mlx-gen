@@ -4,8 +4,9 @@ MiniMax-H3 denoises one packed 1-D sequence holding the text conditioning, the
 keyframe conditioning rows, the audio rows and the video rows. This module owns the
 arithmetic that describes that sequence — canvas and frame-count rules, the
 `(t, h, w)` rotary coordinates of every row, the per-row modality tags, the row
-indices of each modality, and the per-step timestep plan — following the diffusers
-`modular_pipelines/minimax_h3` blocks exactly. Rotary grids are computed in float64
+indices of each modality, and the per-step timestep plan — for `t2va` / `fl2va` and for
+`ref2va` — following the diffusers `modular_pipelines/minimax_h3` blocks (Apache-2.0, The
+MiniMax and HuggingFace Teams) exactly. Rotary grids are computed in float64
 as upstream does and cast to float32 where the transformer consumes them.
 """
 
@@ -223,6 +224,26 @@ class H3PackedLayout:
         return int(self.text_indices.shape[0])
 
 
+def _fill_audio_positions(
+    position_ids: np.ndarray,
+    rows: slice,
+    num_audio_latents: int,
+    origin: float,
+    width_grid: np.ndarray,
+    audio_channels: int,
+) -> None:
+    """Place one channel-major audio block: time `origin + i` on every channel, no height coordinate, and the
+    channels pinned to the two ends of the width grid of *their own* block (the target grid for a standalone clip)."""
+    time = origin + np.arange(num_audio_latents, dtype=np.float64)
+    position_ids[rows, 0] = np.tile(time, audio_channels)
+    position_ids[rows, 2] = np.concatenate(
+        [
+            np.full(num_audio_latents, float(width_grid[0]), dtype=np.float64),
+            np.full(num_audio_latents * (audio_channels - 1), float(width_grid[-1]), dtype=np.float64),
+        ]
+    )
+
+
 def build_packed_sequence(
     text_token_tags: np.ndarray,
     num_latent_frames: int,
@@ -263,13 +284,13 @@ def build_packed_sequence(
         position_ids[rows, 0] = anchor_time
         position_ids[rows, 1:] = frame_grid
 
-    audio_time = float(num_text_tokens) + np.arange(num_audio_latents, dtype=np.float64)
-    position_ids[audio_start:video_start, 0] = np.tile(audio_time, audio_channels)
-    position_ids[audio_start:video_start, 2] = np.concatenate(
-        [
-            np.full(num_audio_latents, float(width_grid[0]), dtype=np.float64),
-            np.full(num_audio_rows - num_audio_latents, float(width_grid[-1]), dtype=np.float64),
-        ]
+    _fill_audio_positions(
+        position_ids,
+        slice(audio_start, video_start),
+        num_audio_latents,
+        float(num_text_tokens),
+        width_grid,
+        audio_channels,
     )
 
     video_positions = np.empty((num_latent_frames, rows_per_frame, 3), dtype=np.float64)
@@ -293,6 +314,111 @@ def build_packed_sequence(
         text_indices=mx.array(text_indices.astype(np.int32)),
         num_condition_video_rows=num_condition_rows,
         num_condition_audio_rows=0,
+    )
+
+
+@dataclass(frozen=True)
+class H3ReferenceBlock:
+    """Geometry of one `ref2va` reference: an image's latent `(frames, height, width)` or an audio clip's latent count."""
+
+    kind: str  # "image" | "audio"
+    latent_frames: int = 0
+    latent_height: int = 0
+    latent_width: int = 0
+    num_audio_latents: int = 0
+
+
+def build_ref2va_packed_sequence(
+    text_token_tags: np.ndarray,
+    references: list[H3ReferenceBlock],
+    num_latent_frames: int,
+    latent_height: int,
+    latent_width: int,
+    num_audio_latents: int,
+    patch_size: tuple[int, int, int] = (1, 2, 2),
+    audio_channels: int = AUDIO_CHANNELS,
+) -> H3PackedLayout:
+    """Build the `[text | reference blocks in request order | target audio | target video]` layout of `ref2va`.
+
+    The reference order is semantic: every block advances the shared audio/video rotary clock (an image by one slot,
+    an audio clip by its latent count), and the target audio and video start where the references leave it rather
+    than at the text length as `t2va` / `fl2va` do.
+    """
+    _, patch_h, patch_w = patch_size
+    num_text_tokens = int(text_token_tags.shape[0])
+    rows_per_frame = (latent_height // patch_h) * (latent_width // patch_w)
+
+    def visual_rows(block: H3ReferenceBlock) -> int:
+        return block.latent_frames * (block.latent_height // patch_h) * (block.latent_width // patch_w)
+
+    for block in references:
+        if block.kind not in ("image", "audio"):
+            raise ValueError(f"A reference must be an 'image' or an 'audio', got {block.kind!r}.")
+    num_reference_video_rows = sum(visual_rows(block) for block in references if block.kind == "image")
+    num_reference_audio_rows = sum(
+        block.num_audio_latents * audio_channels for block in references if block.kind == "audio"
+    )
+    num_target_audio_rows = num_audio_latents * audio_channels
+    sequence_length = (
+        num_text_tokens
+        + num_reference_video_rows
+        + num_reference_audio_rows
+        + num_target_audio_rows
+        + num_latent_frames * rows_per_frame
+    )
+
+    position_ids = np.zeros((sequence_length, 3), dtype=np.float64)
+    position_ids[:num_text_tokens, 0] = np.arange(num_text_tokens, dtype=np.float64)
+    target_frame_grid, target_width_grid = _frame_position_grid(latent_height, latent_width, patch_h, patch_w)
+
+    video_parts: list[np.ndarray] = []
+    audio_parts: list[np.ndarray] = []
+    cursor = num_text_tokens
+    rotary_time = float(num_text_tokens)
+    for block in references:
+        if block.kind == "image":
+            rows = slice(cursor, cursor + visual_rows(block))
+            frame_grid, _ = _frame_position_grid(block.latent_height, block.latent_width, patch_h, patch_w)
+            position_ids[rows, 0] = rotary_time
+            position_ids[rows, 1:] = np.tile(frame_grid, (block.latent_frames, 1))
+            video_parts.append(np.arange(rows.start, rows.stop))
+            # An image is a single frame and takes a single integer rotary slot, not a latent frame's 5/3 units.
+            rotary_time += 1.0
+        else:
+            rows = slice(cursor, cursor + block.num_audio_latents * audio_channels)
+            _fill_audio_positions(
+                position_ids, rows, block.num_audio_latents, rotary_time, target_width_grid, audio_channels
+            )
+            audio_parts.append(np.arange(rows.start, rows.stop))
+            rotary_time += float(block.num_audio_latents)
+        cursor = rows.stop
+
+    audio_start = cursor
+    video_start = audio_start + num_target_audio_rows
+    _fill_audio_positions(
+        position_ids, slice(audio_start, video_start), num_audio_latents, rotary_time, target_width_grid, audio_channels
+    )
+    video_positions = np.empty((num_latent_frames, rows_per_frame, 3), dtype=np.float64)
+    video_positions[:, :, 0] = _temporal_position_grid(num_latent_frames, rotary_time)[:, None]
+    video_positions[:, :, 1:] = target_frame_grid[None]
+    position_ids[video_start:] = video_positions.reshape(-1, 3)
+
+    video_indices = np.concatenate(video_parts + [np.arange(video_start, sequence_length)])
+    audio_indices = np.concatenate(audio_parts + [np.arange(audio_start, video_start)])
+    text_indices = np.arange(num_text_tokens)
+    token_tags = np.empty(sequence_length, dtype=np.int32)
+    token_tags[text_indices] = text_token_tags.astype(np.int32)
+    token_tags[audio_indices] = AUDIO_TAG
+    token_tags[video_indices] = VIDEO_TAG
+
+    return H3PackedLayout(
+        position_ids=mx.array(position_ids.astype(np.float32)),
+        token_tags=mx.array(token_tags),
+        video_indices=mx.array(video_indices.astype(np.int32)),
+        audio_indices=mx.array(audio_indices.astype(np.int32)),
+        text_indices=mx.array(text_indices.astype(np.int32)),
+        num_condition_video_rows=num_reference_video_rows,
+        num_condition_audio_rows=num_reference_audio_rows,
     )
 
 
