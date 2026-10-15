@@ -252,8 +252,15 @@ class SeedVR2Util:
             input_start_frame = max(0, output_start - overlap)
             input_end_frame = min(frame_count, input_start_frame + input_frame_count)
             if input_end_frame - input_start_frame < input_frame_count:
-                input_start_frame = max(0, input_end_frame - input_frame_count)
-            output_count = remaining_output_frames if input_end_frame >= frame_count else min(output_stride, remaining_output_frames)
+                # Pin the tail window to the clip end, but keep its start on the latent temporal stride (4):
+                # an unaligned start (e.g. 120 frames, chunk 29 -> 91) is rejected by SeedVR2._latent_start_frame.
+                # Rounding down widens this one window by at most 3 frames.
+                input_start_frame = max(0, (input_end_frame - input_frame_count) // 4 * 4)
+            output_count = (
+                remaining_output_frames
+                if input_end_frame >= frame_count
+                else min(output_stride, remaining_output_frames)
+            )
             trim_leading_context_frames = output_start - input_start_frame
             target_input_frame_count = SeedVR2Util.padded_video_frame_count(input_end_frame - input_start_frame)
             chunks.append(
@@ -291,7 +298,9 @@ class SeedVR2Util:
         decoded_video_bytes = frame_count * height * width * 3 * 2
         latent_bytes = frame_count * latent_height * latent_width * 16 * 2
 
-        return int((qkv_bytes * attention_multiplier) + processed_video_bytes + decoded_video_bytes + (latent_bytes * 4))
+        return int(
+            (qkv_bytes * attention_multiplier) + processed_video_bytes + decoded_video_bytes + (latent_bytes * 4)
+        )
 
     @staticmethod
     def estimate_video_restore_total_bytes(

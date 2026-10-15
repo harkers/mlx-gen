@@ -1112,3 +1112,18 @@ def test_video_util_iter_video_frame_windows_streams_overlapping_windows(tmp_pat
         assert len(observed_window) == len(expected_window)
         for observed, target in zip(observed_window, expected_window):
             assert observed == pytest.approx(target, abs=3.0)
+
+
+@pytest.mark.parametrize("chunk_size,overlap", [(29, 8), (33, 8), (77, 8), (25, 4)])
+def test_seedvr2_streamed_video_chunk_plan_aligns_every_start_for_any_frame_count(chunk_size, overlap):
+    # The tail chunk used to be pinned to frame_count - chunk_size, giving starts like 91 (120 frames, chunk 29)
+    # that SeedVR2._latent_start_frame rejects. Every start must sit on the latent temporal stride (4).
+    for frame_count in range(chunk_size + 1, 4 * chunk_size):
+        chunks = SeedVR2Util.plan_streamed_video_chunks(frame_count, chunk_size, overlap)
+        assert all(c.input_start_frame % 4 == 0 for c in chunks), (frame_count, chunks)
+        assert sum(c.output_frame_count for c in chunks) == frame_count
+        assert chunks[-1].input_end_frame == frame_count
+        for c in chunks:
+            assert c.input_end_frame - c.input_start_frame <= chunk_size + 3
+            assert c.target_input_frame_count >= c.input_end_frame - c.input_start_frame
+            assert c.trim_leading_context_frames >= 0
