@@ -12,6 +12,8 @@ import os
 
 
 def pytest_configure(config):
+    # tests build MiniMaxH3 freely; the machine-wide render slot (render_slot.py) is for real renders
+    os.environ.setdefault("MFLUX_MAX_RENDERS", "0")
     requested = os.environ.get("MFLUX_FAKE_TOTAL_RAM_GIB", "").strip()
     if not requested:
         return

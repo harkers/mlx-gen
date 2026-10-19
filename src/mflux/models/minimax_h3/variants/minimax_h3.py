@@ -80,6 +80,7 @@ from mflux.models.minimax_h3.variants.h3_references import (
 from mflux.models.minimax_h3.weights.h3_weight_definition import MiniMaxH3WeightDefinition
 from mflux.utils.generated_audio import GeneratedAudio
 from mflux.utils.generated_video import GeneratedVideo
+from mflux.utils.render_slot import acquire_render_slot
 from mflux.utils.runtime_memory import RuntimeMemory
 
 PROMPT_FIELDS = ("integrated_multimodal_description", "overall_soundscape", "non_diegetic_music")
@@ -156,6 +157,8 @@ class MiniMaxH3(nn.Module):
         lora_scales: list[float] | None = None,
     ):
         super().__init__()
+        # ~60 GB resident per render: wait for a machine-wide slot before any weight is read (see render_slot.py)
+        acquire_render_slot()
         MiniMaxH3Initializer.init(
             self,
             model_config=model_config or ModelConfig.minimax_h3(),
